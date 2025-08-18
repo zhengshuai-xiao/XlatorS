@@ -15,12 +15,9 @@ import (
 	"github.com/minio/minio/pkg/bucket/policy"
 	"github.com/minio/minio/pkg/madmin"
 	"github.com/zhengshuai-xiao/S3Store/internal"
+	s3meta "github.com/zhengshuai-xiao/S3Store/pkg/meta"
 
 	minio "github.com/minio/minio/cmd"
-	//"github.com/juicedata/juicefs/pkg/fs"
-	//"github.com/juicedata/juicefs/pkg/meta"
-	//"github.com/juicedata/juicefs/pkg/utils"
-	//"github.com/juicedata/juicefs/pkg/vfs"
 )
 
 const (
@@ -43,15 +40,18 @@ type Config struct {
 	ReadOnly    bool
 	BackendAddr string
 	Creds       *credentials.Credentials
+	MetaDriver  string
+	MetaAddr    string
 }
 
 func NewS3Gateway(gConf *Config) (minio.ObjectLayer, error) {
-	//mctx = meta.NewContext(uint32(os.Getpid()), uint32(os.Getuid()), []uint32{uint32(os.Getgid())})
+	//mctx = s3meta.NewContext(uint32(os.Getpid()), uint32(os.Getuid()), []uint32{uint32(os.Getgid())})
 
 	s3 := &S3{host: gConf.BackendAddr}
-	logger.Info("NewS3Gateway Endpoint: %s", s3.host)
+	logger.Info("NewS3Gateway Endpoint:", s3.host)
 	creds := auth.Credentials{}
-	s3store, err := s3.NewGatewayLayer(creds)
+	s3store := NewS3SObject(gConf)
+	err := s3.NewGatewayLayer(creds, s3store)
 
 	if err != nil {
 		logger.Errorf("failed to create S3 client: %v", err)
@@ -67,6 +67,22 @@ type S3SObjects struct {
 	Client     *miniogo.Core
 	HTTPClient *http.Client
 	Metrics    *minio.BackendMetrics
+	Metaclient s3meta.Meta
+}
+
+func NewS3SObject(gConf *Config) *S3SObjects {
+	metaconf := s3meta.NewMetaConfig()
+	redismeta, err := s3meta.NewRedisMeta(gConf.MetaDriver, gConf.MetaAddr, metaconf)
+	if err != nil {
+		logger.Errorf("failed to create redis s3meta: %v", err)
+		return nil
+	}
+	return &S3SObjects{
+		Client:     nil,
+		HTTPClient: nil,
+		Metrics:    nil,
+		Metaclient: redismeta,
+	}
 }
 
 // Shutdown saves any gateway metadata to disk
@@ -106,8 +122,16 @@ func (l *S3SObjects) StorageInfo(ctx context.Context) (si minio.StorageInfo, _ [
 }
 
 func (n *S3SObjects) DeleteBucket(ctx context.Context, bucket string, forceDelete bool) error {
-	err := n.Client.RemoveBucket(ctx, bucket)
+	//bucket = n.Metaclient.ConvertBucketName(bucket)
+	//delete the bucket in Meta
+	err := n.Metaclient.DelBucket(bucket)
+	if err != nil {
+		logger.Errorf("S3SObjects::DeleteBucket: failed to delete bucket(%s): %s", bucket, err)
+		return minio.ErrorRespToObjectError(err, bucket)
+	}
 
+	//delete the bucket in backend
+	err = n.Client.RemoveBucket(ctx, bucket)
 	if err != nil {
 		return minio.ErrorRespToObjectError(err, bucket)
 	}
@@ -118,7 +142,8 @@ func (n *S3SObjects) MakeBucketWithLocation(ctx context.Context, bucket string, 
 	if opts.LockEnabled || opts.VersioningEnabled {
 		return minio.NotImplemented{}
 	}
-
+	//bucket := n.Metaclient.ConvertBucketName(bucket_orig)
+	logger.Infof("new bucket name: %s", bucket)
 	// Verify if bucket name is valid.
 	// We are using a separate helper function here to validate bucket
 	// names instead of IsValidBucketName() because there is a possibility
@@ -129,15 +154,24 @@ func (n *S3SObjects) MakeBucketWithLocation(ctx context.Context, bucket string, 
 	if s3utils.CheckValidBucketName(bucket) != nil {
 		return minio.BucketNameInvalid{Bucket: bucket}
 	}
-	err := n.Client.MakeBucket(ctx, bucket, miniogo.MakeBucketOptions{Region: opts.Location})
+	err := n.Metaclient.MakeBucket(bucket)
 	if err != nil {
 		return minio.ErrorRespToObjectError(err, bucket)
 	}
+
+	err = n.Client.MakeBucket(ctx, bucket, miniogo.MakeBucketOptions{Region: opts.Location})
+	if err != nil {
+		return minio.ErrorRespToObjectError(err, bucket)
+	}
+
 	return err
 }
 
 func (n *S3SObjects) GetBucketInfo(ctx context.Context, bucket string) (bi minio.BucketInfo, err error) {
-	buckets, err := n.Client.ListBuckets(ctx)
+	//bucket = n.Metaclient.ConvertBucketName(bucket)
+
+	buckets, err := n.Metaclient.ListBuckets()
+	//buckets, err := n.Client.ListBuckets(ctx)
 	if err != nil {
 		// Listbuckets may be disallowed, proceed to check if
 		// bucket indeed exists, if yes return success.
@@ -161,7 +195,7 @@ func (n *S3SObjects) GetBucketInfo(ctx context.Context, bucket string) (bi minio
 
 		return minio.BucketInfo{
 			Name:    bi.Name,
-			Created: bi.CreationDate,
+			Created: bi.Created,
 		}, nil
 	}
 
@@ -169,7 +203,9 @@ func (n *S3SObjects) GetBucketInfo(ctx context.Context, bucket string) (bi minio
 }
 
 func (n *S3SObjects) ListBuckets(ctx context.Context) ([]minio.BucketInfo, error) {
-	buckets, err := n.Client.ListBuckets(ctx)
+	buckets, err := n.Metaclient.ListBuckets()
+
+	//buckets, err := n.Client.ListBuckets(ctx)
 	if err != nil {
 		return nil, minio.ErrorRespToObjectError(err)
 	}
@@ -178,8 +214,9 @@ func (n *S3SObjects) ListBuckets(ctx context.Context) ([]minio.BucketInfo, error
 	for i, bi := range buckets {
 		b[i] = minio.BucketInfo{
 			Name:    bi.Name,
-			Created: bi.CreationDate,
+			Created: bi.Created,
 		}
+		logger.Infof("ListBuckets: found bucket %s", bi.Name)
 	}
 
 	return b, err

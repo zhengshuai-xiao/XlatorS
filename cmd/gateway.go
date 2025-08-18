@@ -85,6 +85,11 @@ func cmdGateway() *cli.Command {
 			Value: "127.0.0.1:9000",
 			Usage: "the S3 API listen address",
 		},
+		&cli.StringFlag{
+			Name:  "meta-addr",
+			Value: "127.0.0.1:6379/1",
+			Usage: "the address of the metadata storage",
+		},
 	}
 
 	return &cli.Command{
@@ -153,6 +158,8 @@ func gateway(c *cli.Context) error {
 			HideDir:     c.Bool("hide-dir-object"),
 			ReadOnly:    readonly,
 			BackendAddr: c.String("backend-addr"),
+			MetaDriver:  "redis",
+			MetaAddr:    c.String("meta-addr"),
 		},
 	)
 	if err != nil {

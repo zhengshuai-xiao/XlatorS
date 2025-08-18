@@ -152,7 +152,7 @@ func newS3(urlStr string, tripper http.RoundTripper) (*miniogo.Core, error) {
 }
 
 // NewGatewayLayer returns s3 ObjectLayer.
-func (g *S3) NewGatewayLayer(creds auth.Credentials) (minio.ObjectLayer, error) {
+func (g *S3) NewGatewayLayer(creds auth.Credentials, s3Objects *S3SObjects) error {
 	metrics := minio.NewMetrics()
 
 	t := &minio.MetricsTransport{
@@ -164,7 +164,7 @@ func (g *S3) NewGatewayLayer(creds auth.Credentials) (minio.ObjectLayer, error) 
 	// all credentials.
 	clnt, err := newS3(g.host, t)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	probeBucketName := randString(60, rand.NewSource(time.Now().UnixNano()), "probe-bucket-sign-")
@@ -172,16 +172,13 @@ func (g *S3) NewGatewayLayer(creds auth.Credentials) (minio.ObjectLayer, error) 
 	// Check if the provided keys are valid.
 	if _, err = clnt.BucketExists(context.Background(), probeBucketName); err != nil {
 		if miniogo.ToErrorResponse(err).Code != "AccessDenied" {
-			return nil, err
+			return err
 		}
 	}
-
-	s := S3SObjects{
-		Client:  clnt,
-		Metrics: metrics,
-		HTTPClient: &http.Client{
-			Transport: t,
-		},
+	s3Objects.Client = clnt
+	s3Objects.Metrics = metrics
+	s3Objects.HTTPClient = &http.Client{
+		Transport: t,
 	}
 
 	// Enables single encryption of KMS is configured.
@@ -194,9 +191,9 @@ func (g *S3) NewGatewayLayer(creds auth.Credentials) (minio.ObjectLayer, error) 
 				minio.GlobalStaleUploadsCleanupInterval, minio.GlobalStaleUploadsExpiry)
 		*/
 		logger.Errorf("Failed to enable single encryption of KMS is configured")
-		return nil, nil
+		return nil
 	}
-	return &s, nil
+	return nil
 }
 
 // Production - s3 gateway is production ready.
