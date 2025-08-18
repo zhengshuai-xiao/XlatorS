@@ -363,7 +363,7 @@ func (m *RedisMeta) MakeBucket(bucket string) error {
 		return err
 	}
 	logger.Infof("RedisMeta::MakeBucket[%s]: %s", bucket_in_redis, jsonData)
-	return m.rdb.SAdd(ctx, bucket_in_redis, jsonData).Err()
+	return m.rdb.Set(ctx, bucket_in_redis, jsonData, 0).Err()
 }
 
 func (m *RedisMeta) DelBucket(bucket string) error {
@@ -381,14 +381,14 @@ func (m *RedisMeta) ListBuckets() ([]minio.BucketInfo, error) {
 	var result []minio.BucketInfo
 	for iter.Next(ctx) {
 		bucket := iter.Val()
-		members, err := m.rdb.SMembers(ctx, bucket).Result()
+		jasondata, err := m.rdb.Get(ctx, bucket).Result()
 		if err != nil {
 			logger.Errorf("RedisMeta::ListBuckets: failed to list members of bucket(%s): %s", bucket, err)
 			continue
 		}
 		var bucketinfo BucketInfo
-		if err := json.Unmarshal([]byte(members[0]), &bucketinfo); err != nil {
-			logger.Errorf("RedisMeta::ListBuckets: failed to unmarshal bucket info(%s): %s", members[0], err)
+		if err := json.Unmarshal([]byte(jasondata), &bucketinfo); err != nil {
+			logger.Errorf("RedisMeta::ListBuckets: failed to unmarshal bucket info(%s): %s", jasondata, err)
 			continue
 		}
 		result = append(result, minio.BucketInfo{Name: bucketinfo.Name,
