@@ -17,7 +17,9 @@ endif
 
 build:
 	go version
-	go build -ldflags="$(LDFLAGS)" -o $(s3store) main.go
+	go build -gcflags "all=-N -l"  -o $(s3store) main.go
+#go build -ldflags="$(LDFLAGS)" -o $(s3store) main.go
+#-gcflags "all=-N -l"
 
 run:
 	go run main.go

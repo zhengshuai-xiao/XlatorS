@@ -1,0 +1,93 @@
+package dedup
+
+import (
+	"context"
+	"fmt"
+	"strconv"
+
+	"github.com/redis/go-redis/v9"
+	"github.com/zhengshuai-xiao/S3Store/internal"
+)
+
+type MDSRedis struct {
+	rdb redis.UniversalClient
+}
+
+func (m *MDSRedis) GetIncreasedDOID() (string, error) {
+	ctx := context.Background()
+
+	id, err := m.rdb.Incr(ctx, doidkey).Result()
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("DataObj%d", id), nil
+}
+
+func (m *MDSRedis) GetIncreasedManifestID() (string, error) {
+	ctx := context.Background()
+
+	id, err := m.rdb.Incr(ctx, manifestKey).Result()
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("Manifest%d", id), nil
+}
+func (m *MDSRedis) WriteManifest(manifestid string, chunks []Chunk) error {
+	ctx := context.Background()
+	for _, chunk := range chunks {
+		str, err := internal.SerializeToString(ChunkInManifest{FP: chunk.FP, DOid: chunk.DOid})
+		_, err = m.rdb.RPush(ctx, manifestid, str).Result()
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (m *MDSRedis) GetManifest(manifestid string) (chunks []ChunkInManifest, err error) {
+	ctx := context.Background()
+	// Get the list of chunk IDs from the manifest
+	fps, err := m.rdb.LRange(ctx, manifestid, 0, -1).Result()
+	if err != nil {
+		return nil, err
+	}
+
+	// Retrieve each chunk's metadata
+	for _, fp := range fps {
+
+		var chunk ChunkInManifest
+		if err := internal.DeserializeFromString(fp, &chunk); err != nil {
+			return nil, err
+		}
+		chunks = append(chunks, chunk)
+	}
+	return chunks, nil
+}
+
+func (m *MDSRedis) DedupFPs(chunks []Chunk) error {
+	ctx := context.Background()
+	//pipe := m.rdb.Pipeline()
+
+	for i, chunk := range chunks {
+		val, err := m.rdb.Get(ctx, chunk.FP).Result()
+		if err != nil {
+			logger.Errorf("failed to get fingerprint for chunk(%d): %v", i, err)
+			chunks[i].Deduped = false
+			continue
+		}
+		chunks[i].Deduped = true
+		parsedDOid, _ := strconv.ParseInt(val, 10, 64)
+		chunks[i].DOid = uint64(parsedDOid)
+	}
+	return nil
+}
+
+func (m *MDSRedis) InsertFPs(chunks []ChunkInManifest) error {
+	ctx := context.Background()
+	pipe := m.rdb.Pipeline()
+	for _, chunk := range chunks {
+		pipe.Set(ctx, chunk.FP, chunk.DOid, 0)
+	}
+	_, err := pipe.Exec(ctx)
+	return err
+}

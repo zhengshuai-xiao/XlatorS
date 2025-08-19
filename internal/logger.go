@@ -213,3 +213,13 @@ func GetDefaultLogDir() string {
 	}
 	return defaultLogDir
 }
+
+func GetCurrentFuncName() string {
+	// runtime.Caller(1) 表示获取调用当前函数的函数信息
+	pc, _, _, ok := runtime.Caller(1)
+	if !ok {
+		return "unknown"
+	}
+	// 获取函数信息并返回函数名
+	return runtime.FuncForPC(pc).Name()
+}
