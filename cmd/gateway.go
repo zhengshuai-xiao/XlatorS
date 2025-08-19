@@ -9,7 +9,8 @@ import (
 	minio "github.com/minio/minio/cmd"
 	"github.com/urfave/cli/v2"
 	"github.com/zhengshuai-xiao/S3Store/internal"
-	s3sgateway "github.com/zhengshuai-xiao/S3Store/pkg/gateway"
+	"github.com/zhengshuai-xiao/S3Store/pkg/dedup"
+	s3forward "github.com/zhengshuai-xiao/S3Store/pkg/s3forward"
 )
 
 func cmdGateway() *cli.Command {
@@ -90,6 +91,11 @@ func cmdGateway() *cli.Command {
 			Value: "127.0.0.1:6379/1",
 			Usage: "the address of the metadata storage",
 		},
+		&cli.StringFlag{
+			Name:  "xlator",
+			Value: "Dedup",
+			Usage: "the name of the translator: S3Forward/Dedup",
+		},
 	}
 
 	return &cli.Command{
@@ -99,19 +105,20 @@ func cmdGateway() *cli.Command {
 		Usage:     "Start an S3-compatible gateway",
 		ArgsUsage: "META-URL ADDRESS",
 		Description: `
-It is implemented based on the MinIO S3 Gateway. Before starting the gateway, you need to set
-MINIO_ROOT_USER and MINIO_ROOT_PASSWORD environment variables, which are the access key and secret
-key used for accessing S3 APIs.
+			It is implemented based on the MinIO S3 Gateway. Before starting the gateway, you need to set
+			MINIO_ROOT_USER and MINIO_ROOT_PASSWORD environment variables, which are the access key and secret
+			key used for accessing S3 APIs.
 
-Examples:
-$ export MINIO_ROOT_USER=admin
-$ export MINIO_ROOT_PASSWORD=12345678
-$ s3store gateway redis://localhost localhost:9000`,
+			Examples:
+			$ export MINIO_ROOT_USER=admin
+			$ export MINIO_ROOT_PASSWORD=12345678
+			$ s3store gateway redis://localhost localhost:9000`,
 		Flags: expandFlags(selfFlags, clientFlags(0), shareInfoFlags()),
 	}
+
 }
 
-var s3sGateway minio.ObjectLayer
+var xobject minio.ObjectLayer
 
 func gateway(c *cli.Context) error {
 	//setup(c, 2)
@@ -147,21 +154,42 @@ func gateway(c *cli.Context) error {
 	}
 
 	readonly := c.Bool("read-only")
-	s3sGateway, err = s3sgateway.NewS3Gateway(
-		&s3sgateway.Config{
-			MultiBucket: c.Bool("multi-buckets"),
-			KeepEtag:    c.Bool("keep-etag"),
-			Umask:       uint16(umask),
-			ObjTag:      c.Bool("object-tag"),
-			ObjMeta:     c.Bool("object-meta"),
-			HeadDir:     c.Bool("head-dir"),
-			HideDir:     c.Bool("hide-dir-object"),
-			ReadOnly:    readonly,
-			BackendAddr: c.String("backend-addr"),
-			MetaDriver:  "redis",
-			MetaAddr:    c.String("meta-addr"),
-		},
-	)
+	if c.String("xlator") == s3forward.XlatorName {
+		xobject, err = s3forward.NewS3Object(
+			&internal.Config{
+				Xlator:      c.String("xlator"),
+				MultiBucket: c.Bool("multi-buckets"),
+				KeepEtag:    c.Bool("keep-etag"),
+				Umask:       uint16(umask),
+				ObjTag:      c.Bool("object-tag"),
+				ObjMeta:     c.Bool("object-meta"),
+				HeadDir:     c.Bool("head-dir"),
+				HideDir:     c.Bool("hide-dir-object"),
+				ReadOnly:    readonly,
+				BackendAddr: c.String("backend-addr"),
+				MetaDriver:  "redis",
+				MetaAddr:    c.String("meta-addr"),
+			},
+		)
+	} else if c.String("xlator") == dedup.XlatorName {
+		xobject, err = dedup.NewXlatorDedup(
+			&internal.Config{
+				Xlator:      c.String("xlator"),
+				MultiBucket: c.Bool("multi-buckets"),
+				KeepEtag:    c.Bool("keep-etag"),
+				Umask:       uint16(umask),
+				ObjTag:      c.Bool("object-tag"),
+				ObjMeta:     c.Bool("object-meta"),
+				HeadDir:     c.Bool("head-dir"),
+				HideDir:     c.Bool("hide-dir-object"),
+				ReadOnly:    readonly,
+				BackendAddr: c.String("backend-addr"),
+				MetaDriver:  "redis",
+				MetaAddr:    c.String("meta-addr"),
+			},
+		)
+	}
+
 	if err != nil {
 		return err
 	}
@@ -207,7 +235,7 @@ func gateway(c *cli.Context) error {
 
 func gateway2(ctx *mcli.Context) error {
 	logger.Info("start gateway2")
-	minio.ServerMain4S3Store(ctx, s3sGateway)
+	minio.ServerMain4S3Store(ctx, xobject)
 	logger.Info("end gateway2")
 	return nil
 }

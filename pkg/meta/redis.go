@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -440,4 +441,61 @@ func (m *RedisMeta) GetObjectMeta(object minio.ObjectInfo) error {
 
 func (m *RedisMeta) objectKey(object minio.ObjectInfo) string {
 	return fmt.Sprintf("%s:%s", m.bucketPrefix, object.Name)
+}
+
+func (m *RedisMeta) BucketExist(bucket string) (bool, error) {
+	ctx := context.Background()
+	bucket_in_redis := m.convertBucketName(bucket)
+	_, err := m.rdb.Get(ctx, bucket_in_redis).Result()
+	if err == redis.Nil {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+func (m *RedisMeta) GetIncreasedDOID() (string, error) {
+	ctx := context.Background()
+
+	id, err := m.rdb.Incr(ctx, doidkey).Result()
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("DataObj%d", id), nil
+}
+
+func (m *RedisMeta) GetIncreasedManifestID() (string, error) {
+	ctx := context.Background()
+
+	id, err := m.rdb.Incr(ctx, manifestKey).Result()
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("Manifest%d", id), nil
+}
+
+func (m *RedisMeta) DedupFPs(chunks []internal.Chunk) error {
+	ctx := context.Background()
+	//pipe := m.rdb.Pipeline()
+
+	for i, chunk := range chunks {
+		val, err := m.rdb.Get(ctx, chunk.FP).Result()
+		if err != nil {
+			logger.Errorf("failed to get fingerprint for chunk(%d): %v", i, err)
+			chunks[i].Deduped = false
+			continue
+		}
+		chunks[i].Deduped = true
+		chunks[i].DOid, _ = strconv.ParseInt(val, 10, 64)
+	}
+	return nil
+}
+
+func (m *RedisMeta) InsertFPs(chunks []internal.ChunkinManifest) error {
+	ctx := context.Background()
+	pipe := m.rdb.Pipeline()
+	for _, chunk := range chunks {
+		pipe.Set(ctx, chunk.FP, chunk.DOid, 0)
+	}
+	_, err := pipe.Exec(ctx)
+	return err
 }

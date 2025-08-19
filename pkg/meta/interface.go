@@ -1,6 +1,14 @@
 package meta
 
-import minio "github.com/minio/minio/cmd"
+import (
+	minio "github.com/minio/minio/cmd"
+	"github.com/zhengshuai-xiao/S3Store/internal"
+)
+
+const (
+	manifestKey = "DatamanifestID"
+	doidkey     = "DataObjID" //data object
+)
 
 type Meta interface {
 	// Name of database
@@ -15,4 +23,9 @@ type Meta interface {
 	ListObjects(bucket string) ([]minio.ObjectInfo, error)
 	PutObjectMeta(object minio.ObjectInfo) error
 	GetObjectMeta(object minio.ObjectInfo) error
+	BucketExist(bucket string) (bool, error)
+	GetIncreasedManifestID() (string, error)
+	GetIncreasedDOID() (string, error)
+	DedupFPs(chunks []internal.Chunk) error
+	InsertFPs(chunks []internal.ChunkinManifest) error
 }
