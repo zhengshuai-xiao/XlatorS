@@ -32,3 +32,4 @@ go.work.sum
 # .vscode/
 
 s3store
+upload_file

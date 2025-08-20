@@ -1,159 +1,152 @@
 package main
 
 import (
-	"bytes"
 	"context"
+	"flag"
 	"fmt"
-	"io"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 )
 
-// MinIOConfig 存储 MinIO 连接配置
+// MinIOConfig holds configuration parameters for MinIO connection
 type MinIOConfig struct {
 	Endpoint        string
 	AccessKeyID     string
 	SecretAccessKey string
 	UseSSL          bool
-	BucketName      string
 }
 
-// 初始化 MinIO 客户端
+// newMinIOClient initializes a new MinIO client
 func newMinIOClient(config MinIOConfig) (*minio.Client, error) {
 	client, err := minio.New(config.Endpoint, &minio.Options{
 		Creds:  credentials.NewStaticV4(config.AccessKeyID, config.SecretAccessKey, ""),
 		Secure: config.UseSSL,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("创建客户端失败: %w", err)
+		return nil, fmt.Errorf("failed to create client: %w", err)
 	}
 	return client, nil
 }
 
-// 确保存储桶存在，不存在则创建
+// ensureBucket checks if bucket exists, creates it if not
 func ensureBucket(ctx context.Context, client *minio.Client, bucketName string) error {
 	exists, err := client.BucketExists(ctx, bucketName)
 	if err != nil {
-		return fmt.Errorf("检查桶存在性失败: %w", err)
+		return fmt.Errorf("failed to check bucket existence: %w", err)
 	}
+
 	if !exists {
 		if err := client.MakeBucket(ctx, bucketName, minio.MakeBucketOptions{}); err != nil {
-			return fmt.Errorf("创建桶失败: %w", err)
+			return fmt.Errorf("failed to create bucket: %w", err)
 		}
-		fmt.Printf("存储桶 %s 创建成功\n", bucketName)
+		fmt.Printf("Bucket %s created successfully\n", bucketName)
 	}
 	return nil
 }
 
-// 上传本地文件到 MinIO（修正版）
+// uploadLocalFile uploads a local file to MinIO
 func uploadLocalFile(ctx context.Context, client *minio.Client, bucketName, objectName, localFilePath string) (minio.UploadInfo, error) {
-	// 获取本地文件信息
+	// Get local file information
 	fileInfo, err := os.Stat(localFilePath)
 	if err != nil {
-		return minio.UploadInfo{}, fmt.Errorf("获取文件信息失败: %w", err)
+		return minio.UploadInfo{}, fmt.Errorf("failed to get file info: %w", err)
 	}
 
-	// 打开本地文件
+	// Open local file
 	file, err := os.Open(localFilePath)
 	if err != nil {
-		return minio.UploadInfo{}, fmt.Errorf("打开文件失败: %w", err)
+		return minio.UploadInfo{}, fmt.Errorf("failed to open file: %w", err)
 	}
 	defer file.Close()
 
-	// 设置上传选项（已移除错误的 ContentLength）
+	// Set upload options
 	opts := minio.PutObjectOptions{
-		ContentType: "application/octet-stream", // 设置文件MIME类型
+		ContentType: "application/octet-stream",
 	}
 
-	// 上传文件：size 参数通过 fileInfo.Size() 传递，而非通过 opts
+	// Upload file
 	uploadInfo, err := client.PutObject(
 		ctx,
 		bucketName,
 		objectName,
 		file,
-		fileInfo.Size(), // 这里指定内容长度
+		fileInfo.Size(),
 		opts,
 	)
 	if err != nil {
-		return minio.UploadInfo{}, fmt.Errorf("上传文件失败: %w", err)
-	}
-
-	return uploadInfo, nil
-}
-
-// 上传字节数据到 MinIO（修正版）
-func uploadBytes(ctx context.Context, client *minio.Client, bucketName, objectName string, data []byte) (minio.UploadInfo, error) {
-	// 将字节切片转换为 Reader
-	reader := io.NopCloser(bytes.NewReader(data))
-
-	// 上传字节数据：size 参数为 len(data)
-	uploadInfo, err := client.PutObject(
-		ctx,
-		bucketName,
-		objectName,
-		reader,
-		int64(len(data)), // 这里指定内容长度
-		minio.PutObjectOptions{
-			ContentType: "text/plain", // 文本类型示例
-		},
-	)
-	if err != nil {
-		return minio.UploadInfo{}, fmt.Errorf("上传字节数据失败: %w", err)
+		return minio.UploadInfo{}, fmt.Errorf("failed to upload file: %w", err)
 	}
 
 	return uploadInfo, nil
 }
 
 func main() {
-	// 配置 MinIO 连接信息
-	config := MinIOConfig{
-		Endpoint:        "localhost:9000",
-		AccessKeyID:     "minio",
-		SecretAccessKey: "minioadmin",
-		UseSSL:          false,
-		BucketName:      "xzs2",
+	// Define command line flags
+	endpoint := flag.String("endpoint", "localhost:9000", "MinIO server endpoint")
+	accessKey := flag.String("access-key", "minio", "MinIO access key")
+	secretKey := flag.String("secret-key", "minioadmin", "MinIO secret key")
+	useSSL := flag.Bool("ssl", false, "Use SSL for connection")
+	bucketName := flag.String("bucket", "", "Target bucket name (required)")
+	localFile := flag.String("local-file", "", "Path to local file to upload (required)")
+	objectName := flag.String("object-name", "", "Name for the object in MinIO (optional, uses local filename if empty)")
+
+	// Parse command line flags
+	flag.Parse()
+
+	// Validate required parameters
+	if *bucketName == "" || *localFile == "" {
+		fmt.Println("Error: Both bucket name and local file path are required")
+		flag.Usage()
+		os.Exit(1)
 	}
 
-	// 创建上下文（设置 30 秒超时）
+	// Use local filename as object name if not specified
+	if *objectName == "" {
+		_, fileName := filepath.Split(*localFile)
+		*objectName = fileName
+		fmt.Printf("Using local filename as object name: %s\n", *objectName)
+	}
+
+	// Create configuration
+	config := MinIOConfig{
+		Endpoint:        *endpoint,
+		AccessKeyID:     *accessKey,
+		SecretAccessKey: *secretKey,
+		UseSSL:          *useSSL,
+	}
+
+	// Create context with timeout
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// 初始化客户端
+	// Initialize client
 	client, err := newMinIOClient(config)
 	if err != nil {
-		fmt.Printf("初始化失败: %v\n", err)
-		return
+		fmt.Printf("Client initialization failed: %v\n", err)
+		os.Exit(1)
 	}
 
-	// 确保存储桶存在
-	if err := ensureBucket(ctx, client, config.BucketName); err != nil {
-		fmt.Printf("存储桶处理失败: %v\n", err)
-		return
+	// Ensure bucket exists
+	if err := ensureBucket(ctx, client, *bucketName); err != nil {
+		fmt.Printf("Bucket processing failed: %v\n", err)
+		os.Exit(1)
 	}
 
-	// 示例 1: 上传本地文件
-	localFile := "/tmp/1.data" // 替换为你的本地文件
-	objectName1 := "1.data"
-	uploadInfo, err := uploadLocalFile(ctx, client, config.BucketName, objectName1, localFile)
+	// Upload file
+	uploadInfo, err := uploadLocalFile(ctx, client, *bucketName, *objectName, *localFile)
 	if err != nil {
-		fmt.Printf("本地文件上传失败: %v\n", err)
-	} else {
-		fmt.Printf("本地文件上传成功 - 对象名: %s, 大小: %d 字节, ETag: %s\n",
-			uploadInfo.Key, uploadInfo.Size, uploadInfo.ETag)
+		fmt.Printf("File upload failed: %v\n", err)
+		os.Exit(1)
 	}
 
-	// 示例 2: 上传字节数据
-	/*
-		textData := []byte("这是一段测试文本数据")
-		objectName2 := "uploads/test-data.txt"
-		uploadInfo, err = uploadBytes(ctx, client, config.BucketName, objectName2, textData)
-		if err != nil {
-			fmt.Printf("字节数据上传失败: %v\n", err)
-		} else {
-			fmt.Printf("字节数据上传成功 - 对象名: %s, 大小: %d 字节, ETag: %s\n",
-				uploadInfo.Key, uploadInfo.Size, uploadInfo.ETag)
-		}*/
+	// Print success message
+	fmt.Printf("File uploaded successfully:\n")
+	fmt.Printf("  Bucket:     %s\n", *bucketName)
+	fmt.Printf("  Object:     %s\n", uploadInfo.Key)
+	fmt.Printf("  Size:       %d bytes\n", uploadInfo.Size)
+	fmt.Printf("  ETag:       %s\n", uploadInfo.ETag)
 }
