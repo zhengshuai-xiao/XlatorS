@@ -452,9 +452,15 @@ func (m *MDSRedis) ListObjects(bucket string, prefix string) (result []minio.Obj
 	return result, nil
 }
 
-func (m *MDSRedis) PutObjectMeta(object minio.ObjectInfo) error {
+func (m *MDSRedis) PutObjectMeta(object minio.ObjectInfo, manifestList []ChunkInManifest) error {
 	ctx := context.Background()
-
+	//write manifest
+	logger.Tracef("MDSRedis::PutObjectMeta: writing manifest for object[%s], manifestname:%s, len:%d", object.Name, object.UserTags, len(manifestList))
+	err := m.WriteManifest(object.UserTags, manifestList)
+	if err != nil {
+		return err
+	}
+	//write object
 	jsondata, err := json.Marshal(object)
 	if err != nil {
 		return err
@@ -597,13 +603,17 @@ func (m *MDSRedis) GetIncreasedManifestID() (string, error) {
 	return fmt.Sprintf("Manifest%d", id), nil
 }
 
-func (m *MDSRedis) WriteManifest(manifestid string, chunks []Chunk) error {
+func (m *MDSRedis) WriteManifest(manifestid string, manifestList []ChunkInManifest) error {
 	ctx := context.Background()
-	for _, chunk := range chunks {
-		str, err := internal.SerializeToString(ChunkInManifest{FP: chunk.FP, Len: chunk.Len, DOid: chunk.DOid,
-			OffInDOid: chunk.OffInDOid, LenInDOid: chunk.LenInDOid})
+	for _, chunk := range manifestList {
+		str, err := internal.SerializeToString(chunk)
+		if err != nil {
+			logger.Errorf("MDSRedis::failed to SerializeToString chunk[%v] : %s", chunk, err)
+			return err
+		}
 		_, err = m.rdb.RPush(ctx, manifestid, str).Result()
 		if err != nil {
+			logger.Errorf("MDSRedis::failed to RPush chunk[%v] into manifest[%s] : %s", chunk, manifestid, err)
 			return err
 		}
 	}
@@ -615,6 +625,7 @@ func (m *MDSRedis) GetManifest(manifestid string) (chunks []ChunkInManifest, err
 	// Get the list of chunk IDs from the manifest
 	fps, err := m.rdb.LRange(ctx, manifestid, 0, -1).Result()
 	if err != nil {
+		logger.Errorf("MDSRedis::failed to LRange manifest[%s] : %s", manifestid, err)
 		return nil, err
 	}
 
@@ -623,6 +634,7 @@ func (m *MDSRedis) GetManifest(manifestid string) (chunks []ChunkInManifest, err
 
 		var chunk ChunkInManifest
 		if err := internal.DeserializeFromString(fp, &chunk); err != nil {
+			logger.Errorf("MDSRedis::failed to DeserializeFromString chunk[%v] : %s", chunk, err)
 			return nil, err
 		}
 		chunks = append(chunks, chunk)
@@ -638,9 +650,10 @@ func (m *MDSRedis) DedupFPs(chunks []Chunk) error {
 		fps := m.getFingerprint(chunk.FP)
 		if fps != nil {
 			chunks[i].DOid = fps.DOid
-			chunks[i].LenInDOid = fps.LenInDOid
-			chunks[i].OffInDOid = fps.OffInDOid
-			logger.Tracef("DedupFPs:found existed fp:%s, LenInDOid:%d, OffInDOid:%d", internal.StringToHex(chunk.FP), chunks[i].LenInDOid, chunks[i].OffInDOid)
+			chunks[i].Deduped = true
+			//chunks[i].LenInDOid = fps.LenInDOid
+			//chunks[i].OffInDOid = fps.OffInDOid
+			logger.Tracef("DedupFPs:found existed fp:%s", internal.StringToHex(chunk.FP))
 		}
 	}
 	return nil
@@ -651,7 +664,7 @@ func (m *MDSRedis) InsertFPs(chunks []ChunkInManifest) error {
 
 	for _, chunk := range chunks {
 		//pipe.Set(ctx, getFPNameInMDS(chunk.FP), str, 0)
-		err := m.setFingerprint(chunk.FP, FPValInMDS{DOid: chunk.DOid, OffInDOid: chunk.OffInDOid, LenInDOid: chunk.LenInDOid})
+		err := m.setFingerprint(chunk.FP, FPValInMDS{DOid: chunk.DOid})
 		if err != nil {
 			return err
 		}
@@ -661,22 +674,87 @@ func (m *MDSRedis) InsertFPs(chunks []ChunkInManifest) error {
 	return nil
 }
 
+func (m *MDSRedis) DedupFPsBatch(chunks []Chunk) error {
+	ctx := context.Background()
+	pipe := m.rdb.Pipeline()
+	var err error
+
+	cmder := make([]*redis.StringCmd, len(chunks))
+	for i, chunk := range chunks {
+		cmder[i] = pipe.HGet(ctx, FPCacheKey, chunk.FP)
+	}
+	_, err = pipe.Exec(ctx)
+	if err != nil {
+		if err == redis.Nil {
+			//logger.Tracef("DedupFPsBatch: FPCacheKey:%s does not exist", FPCacheKey)
+			//return nil
+		} else {
+			return err
+		}
+	}
+
+	for i, chunk := range chunks {
+		doidStr, err := cmder[i].Result()
+		if err != nil {
+			if err != redis.Nil {
+				logger.Errorf("DedupFPsBatch: failed to get result for chunk[%d]: %s", i, err)
+			} else {
+				logger.Tracef("DedupFPsBatch: chunk[%d] does not exist", i)
+			}
+
+			continue
+		}
+		if doidStr == "" {
+			logger.Errorf("DedupFPsBatch: chunk[%d] does not exist", i)
+			continue
+		}
+		DOid, err := strconv.ParseUint(doidStr, 10, 64)
+		if err != nil {
+			return err
+		}
+		chunks[i].DOid = DOid
+		chunks[i].Deduped = true
+		logger.Tracef("DedupFPsBatch:found existed fp:%s", internal.StringToHex(chunk.FP))
+	}
+	return nil
+}
+
+func (m *MDSRedis) InsertFPsBatch(chunks []ChunkInManifest) error {
+	ctx := context.Background()
+	var err error
+	pipe := m.rdb.Pipeline()
+
+	for _, chunk := range chunks {
+		_, err := pipe.HSet(ctx, FPCacheKey, chunk.FP, chunk.DOid).Result()
+		if err != nil {
+			return err
+		}
+		logger.Tracef("InsertFPsBatch: fp[%s], DOid:%d", internal.StringToHex(chunk.FP), chunk.DOid)
+	}
+	_, err = pipe.Exec(ctx)
+	if err != nil {
+		logger.Errorf("InsertFPsBatch: failed to Exec pipeline. err:%v", err)
+		return err
+	}
+	return nil
+}
+
 // 1: found, 0 is not
 func (m *MDSRedis) getFingerprint(fp string) *FPValInMDS {
 	ctx := context.Background()
-	fp_val, err := m.rdb.HGet(ctx, FPCacheKey, fp).Result()
+	doidStr, err := m.rdb.HGet(ctx, FPCacheKey, fp).Result()
 	if err != nil {
 		if err == redis.Nil {
 			//not existed
 			return nil
 		}
-		logger.Errorf("setFingerprint: failed to HGet(%s). err:%s", internal.StringToHex(fp), err)
+		logger.Errorf("getFingerprint: failed to HGet(%s). err:%s", internal.StringToHex(fp), err)
 		return nil
 	}
 	fps := &FPValInMDS{}
-	err = internal.DeserializeFromString(fp_val, fps)
+	fps.DOid, err = strconv.ParseUint(doidStr, 10, 64)
 	if err != nil {
-		logger.Errorf("setFingerprint: failed to DeserializeFromString. err:%s", err)
+		logger.Errorf("getFingerprint: failed to ParseUint. err:%s", err)
 		return nil
 	}
 	logger.Tracef("found fp:%s", internal.StringToHex(fp))

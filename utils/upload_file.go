@@ -65,7 +65,9 @@ func uploadLocalFile(ctx context.Context, client *minio.Client, bucketName, obje
 
 	// Set upload options
 	opts := minio.PutObjectOptions{
-		ContentType: "application/octet-stream",
+		ContentType:      "application/octet-stream",
+		PartSize:         1 * 1024 * 1024 * 1024, // 1G
+		DisableMultipart: true,
 	}
 
 	// Upload file

@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"sync"
+	"time"
 
 	minio "github.com/minio/minio/cmd"
 	"github.com/zhengshuai-xiao/S3Store/internal"
@@ -13,7 +14,7 @@ import (
 )
 
 const (
-	bufferSize = 4 * 1024 * 1024
+	bufferSize = 16 * 1024 * 1024
 	maxSize    = 16 * 1024 * 1024
 	filePath   = "/dedup/"
 )
@@ -42,6 +43,10 @@ type DObj struct {
 
 func (x *XlatorDedup) truncateDObj(ctx context.Context, dobj *DObj) (err error) {
 	fps_off := dobj.dob_offset
+	if fps_off <= 8 {
+		logger.Tracef("truncateDObj:nothing need to write")
+		return nil
+	}
 	//write fps
 	for _, fp := range dobj.fps {
 		err = internal.SerializeToFile(fp, dobj.filer)
@@ -86,13 +91,16 @@ func (x *XlatorDedup) newDObj(dobj *DObj) (err error) {
 	return nil
 }
 
-func (x *XlatorDedup) writeDObj(ctx context.Context, dobj *DObj, buf []byte, chunks []Chunk) (err error) {
+func (x *XlatorDedup) writeDObj(ctx context.Context, dobj *DObj, buf []byte, chunks []Chunk) (int, error) {
+	var writenLen int = 0
+	var err error
 	if dobj.dobj_key == "" {
 		err = x.newDObj(dobj)
 		if err != nil {
-			return
+			return 0, err
 		}
 	}
+
 	for i, _ := range chunks {
 		if chunks[i].Deduped {
 			continue
@@ -100,33 +108,36 @@ func (x *XlatorDedup) writeDObj(ctx context.Context, dobj *DObj, buf []byte, chu
 		if dobj.dob_offset+uint64(chunks[i].Len) >= maxSize {
 			err = x.truncateDObj(ctx, dobj)
 			if err != nil {
-				return
+				return 0, err
 			}
 
 			err = x.newDObj(dobj)
 			if err != nil {
-				return
+				return 0, err
 			}
 		}
 
-		_, err = internal.WriteAll(dobj.filer, buf[chunks[i].off:chunks[i].off+chunks[i].Len])
+		len, err := internal.WriteAll(dobj.filer, buf[chunks[i].off:chunks[i].off+chunks[i].Len])
 		if err != nil {
-			return
+			return 0, err
 		}
+		writenLen += len
 		doid, err := x.Mdsclient.GetDOIDFromDObjName(dobj.dobj_key)
 		if err != nil {
-			return err
+			return 0, err
 		}
 		chunks[i].DOid = uint64(doid)
-		chunks[i].OffInDOid = dobj.dob_offset
-		chunks[i].LenInDOid = chunks[i].Len
+		//chunks[i].OffInDOid = dobj.dob_offset
+		//chunks[i].LenInDOid = chunks[i].Len
 		dobj.dob_offset += uint64(chunks[i].Len)
 	}
-	return err
+	return writenLen, err
 }
 
-func (x *XlatorDedup) writeObj(ctx context.Context, r *minio.PutObjReader, objInfo *minio.ObjectInfo) (err error) {
-	totalsize := 0
+func (x *XlatorDedup) writeObj(ctx context.Context, r *minio.PutObjReader, objInfo *minio.ObjectInfo) (manifestList []ChunkInManifest, err error) {
+	var totalSize int64 = 0
+	var totalWriteSize int64 = 0
+	start := time.Now()
 	//TODO:
 	cdc := FixedCDC{Chunksize: 128 * 1024}
 	var buf = buffPool.Get().(*[]byte)
@@ -141,35 +152,50 @@ func (x *XlatorDedup) writeObj(ctx context.Context, r *minio.PutObjReader, objIn
 			}
 			break
 		}
+		totalSize += int64(n)
 		//chunk
 		chunks, err := cdc.Chunking((*buf)[:n])
 		if err != nil {
-			return err
+			logger.Errorf("writeObj: failed to chunk data: %s", err)
+			return nil, err
 		}
 		//calc fp
 		CalcFPs((*buf)[:n], chunks)
 		//search fp
-		err = x.Mdsclient.DedupFPs(chunks)
+		err = x.Mdsclient.DedupFPsBatch(chunks)
 		if err != nil {
-			return err
+			logger.Errorf("writeObj: failed to deduplicate chunks: %s", err)
+			return nil, err
 		}
 		//write data
-		err = x.writeDObj(ctx, dobj, (*buf)[:n], chunks)
+		n, err = x.writeDObj(ctx, dobj, (*buf)[:n], chunks)
 		if err != nil {
+			logger.Errorf("writeObj: failed to writeDObj: %s", err)
 			break
 		}
+		totalWriteSize += int64(n)
 		//append to manifest
-		err = x.Mdsclient.WriteManifest(objInfo.UserTags, chunks)
-		if err != nil {
-			return err
+		for _, chunk := range chunks {
+			manifestList = append(manifestList, ChunkInManifest{
+				FP:   chunk.FP,
+				Len:  chunk.Len,
+				DOid: chunk.DOid,
+			})
 		}
-
 	}
 	err = x.truncateDObj(ctx, dobj)
 	if err != nil {
+		logger.Errorf("writeObj: failed to truncateDObj: %s", err)
 		return
 	}
-	objInfo.Size = int64(totalsize)
+	objInfo.Size = int64(totalSize)
+	dedupRate := float64(totalSize-totalWriteSize) / float64(totalSize)
+	objInfo.UserDefined["wroteSize"] = fmt.Sprintf("%d", totalWriteSize)
+	objInfo.UserDefined["dedupRate"] = fmt.Sprintf("%.2f%%", dedupRate*100)
+	logger.Infof("writeDObj: wroteSize/totalSize %d/%d bytes, dedupRate: %s", totalWriteSize, totalSize, objInfo.UserDefined["dedupRate"])
 
-	return nil
+	elapsed := time.Since(start)
+	logger.Infof("writeDObj: elapsed time %s", elapsed)
+
+	return manifestList, nil
 }

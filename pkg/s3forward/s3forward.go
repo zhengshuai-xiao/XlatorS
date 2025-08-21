@@ -401,7 +401,7 @@ func (l *s3Objects) ListMultipartUploads(ctx context.Context, bucket string, pre
 
 // NewMultipartUpload upload object in multiple parts
 func (l *s3Objects) NewMultipartUpload(ctx context.Context, bucket string, object string, o minio.ObjectOptions) (uploadID string, err error) {
-	logger.Infof("%s: enter", internal.GetCurrentFuncName())
+	logger.Infof("%s: enter:%v", internal.GetCurrentFuncName(), o)
 	var tagMap map[string]string
 	if tagStr, ok := o.UserDefined[xhttp.AmzObjectTagging]; ok {
 		tagObj, err := tags.Parse(tagStr, true)

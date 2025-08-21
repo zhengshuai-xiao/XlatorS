@@ -16,9 +16,15 @@ ifdef STATIC
 	CC = /usr/bin/musl-gcc
 	export CC
 endif
-
 build:
 	go version
+	@echo "building release"
+	go build -ldflags="$(LDFLAGS)" -o $(s3store) main.go
+	go build -ldflags="$(LDFLAGS)" -o $(upload_file) utils/upload_file.go
+	go build -ldflags="$(LDFLAGS)" -o $(calc_fp) utils/calcFP.go
+dbuild:
+	go version
+	@echo "building debug"
 	go build -gcflags "all=-N -l"  -o $(s3store) main.go
 	go build -gcflags "all=-N -l"  -o $(upload_file) utils/upload_file.go
 	go build -gcflags "all=-N -l"  -o $(calc_fp) utils/calcFP.go

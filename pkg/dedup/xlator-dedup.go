@@ -242,7 +242,8 @@ func (x *XlatorDedup) isValidBucketName(bucket string) error {
 }
 
 func (x *XlatorDedup) PutObject(ctx context.Context, bucket string, object string, r *minio.PutObjReader, opts minio.ObjectOptions) (objInfo minio.ObjectInfo, err error) {
-	logger.Tracef("%s: enter", internal.GetCurrentFuncName())
+	logger.Infof("%s: enter+++++", internal.GetCurrentFuncName())
+	start1 := time.Now()
 	err = x.isValidBucketName(bucket)
 	if err != nil {
 		logger.Errorf("this is a invalid bucket name [%s]", bucket)
@@ -281,20 +282,32 @@ func (x *XlatorDedup) PutObject(ctx context.Context, bucket string, object strin
 		IsLatest:    true,
 	}
 	//objInfo.UserDefined["BackendBucket"] = BackendBucket
-	logger.Trace("PutObject 2")
-	err = x.writeObj(ctx, r, &objInfo)
+	logger.Info("PutObject 2")
+	var manifestList []ChunkInManifest
+	manifestList, err = x.writeObj(ctx, r, &objInfo)
 	if err != nil {
 		logger.Errorf("failed to write data to object %s: %v", object, err)
 		return objInfo, err
 	}
-	logger.Trace("PutObject 3")
+	elapsed1 := time.Since(start1)
+	start2 := time.Now()
+	logger.Infof("PutObject 3, manifestList=%d, elapsed1=%f", len(manifestList), elapsed1.Seconds())
 	//commit meta data
-	err = x.Mdsclient.PutObjectMeta(objInfo)
+	err = x.Mdsclient.PutObjectMeta(objInfo, manifestList)
 	if err != nil {
 		logger.Errorf("failed to commit metadata for object %s: %v", object, err)
 		return objInfo, err
 	}
-	logger.Trace("PutObject 4")
+	elapsed2 := time.Since(start2)
+	logger.Infof("PutObject 4, manifestList=%d, elapsed2=%f", len(manifestList), elapsed2.Seconds())
+	err = x.Mdsclient.InsertFPsBatch(manifestList)
+	if err != nil {
+		logger.Errorf("failed to insert fingerprints for object %s: %v", object, err)
+		return objInfo, err
+	}
+	elapsed := time.Since(start1)
+	logger.Infof("PutObject(%s) took %vs, throughPut: %.2f MB/s", object, elapsed.Seconds(), float64(objInfo.Size)/(1024*1024)/elapsed.Seconds())
+	logger.Infof("%s: end-----", internal.GetCurrentFuncName())
 	return objInfo, nil
 }
 

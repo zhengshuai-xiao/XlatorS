@@ -62,7 +62,7 @@ func readFile2Buf(localFilePath string) (data []byte, err error) {
 			return nil, fmt.Errorf("读取文件失败: %w", err)
 		}
 	}
-
+	fmt.Printf("readFile2Buf: read %d bytes\n", len(data))
 	return data, nil
 }
 
@@ -88,7 +88,11 @@ func main() {
 	if err != nil {
 		return
 	}
-	dedup.CalcFPs(data, chunks[:])
+	fmt.Printf("chunks:%v", chunks)
+
+	fmt.Printf("data length %d bytes\n", len(data))
+
+	dedup.CalcFPs(data, chunks)
 	for _, chunk := range chunks {
 		fmt.Printf("fp:%s \n", internal.StringToHex(chunk.FP))
 	}

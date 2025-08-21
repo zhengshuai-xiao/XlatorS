@@ -8,7 +8,7 @@ import (
 
 func CalcFP(buf []byte, c *Chunk) {
 	hash := sha256.New()
-	hash.Write(buf[c.off : c.off+c.Len])
+	hash.Write(buf)
 	c.FP = string(hash.Sum(nil))
 	//c.FP = hex.EncodeToString(hashByte)
 	logger.Tracef("CalcFP:fp:%s", internal.StringToHex(c.FP))

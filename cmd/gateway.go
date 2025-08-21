@@ -7,6 +7,7 @@ import (
 
 	mcli "github.com/minio/cli"
 	minio "github.com/minio/minio/cmd"
+	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v2"
 	"github.com/zhengshuai-xiao/S3Store/internal"
 	"github.com/zhengshuai-xiao/S3Store/pkg/dedup"
@@ -19,6 +20,11 @@ func cmdGateway() *cli.Command {
 			Name:  "log",
 			Usage: "path for gateway log",
 			Value: path.Join(internal.GetDefaultLogDir(), "s3store-gateway.log"),
+		},
+		&cli.StringFlag{
+			Name:  "loglevel",
+			Usage: "log level for gateway: trace/info/warn/error",
+			Value: "info",
 		},
 		&cli.StringFlag{
 			Name:  "access-log",
@@ -78,7 +84,7 @@ func cmdGateway() *cli.Command {
 		},
 		&cli.StringFlag{
 			Name:  "backend-addr",
-			Value: "http://127.0.0.1:9001",
+			Value: "http://127.0.0.1:1234",
 			Usage: "the address of the backend storage",
 		},
 		&cli.StringFlag{
@@ -144,6 +150,20 @@ func gateway(c *cli.Context) error {
 		os.Setenv("MINIO_REFRESH_IAM_INTERVAL", c.String("refresh-iam-interval"))
 	}
 
+	switch c.String("loglevel") {
+	case "trace":
+		internal.SetLogLevel(logrus.TraceLevel)
+	case "debug":
+		internal.SetLogLevel(logrus.DebugLevel)
+	case "info":
+		internal.SetLogLevel(logrus.InfoLevel)
+	case "warn":
+		internal.SetLogLevel(logrus.WarnLevel)
+	case "error":
+		internal.SetLogLevel(logrus.ErrorLevel)
+	default:
+		internal.SetLogLevel(logrus.InfoLevel)
+	}
 	//metaAddr := c.Args().Get(0)
 	listenAddr := c.String("address")
 	//conf, jfs := initForSvc(c, c.String("mountpoint"), "s3gateway", metaAddr, listenAddr)
