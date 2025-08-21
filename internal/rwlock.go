@@ -8,6 +8,7 @@ import (
 	minio "github.com/minio/minio/cmd"
 )
 
+// TODO: this is fake lock, need to implement a real distributed lock
 type StoreFLock struct {
 	//inode     meta.Ino
 	Owner uint64

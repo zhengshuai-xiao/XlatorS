@@ -35,7 +35,7 @@ run:
 	go run main.go
 
 clean:
-	rm -f $(xlators)
+	rm -f $(xlators) $(upload_file) $(calc_fp)
 
 deps:
 	go mod tidy
