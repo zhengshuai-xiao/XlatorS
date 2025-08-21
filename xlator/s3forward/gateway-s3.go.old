@@ -41,12 +41,12 @@ func S3GatewayMain(ctx *cli.Context, gw minio.Gateway) {
 }
 
 // S3 implements Gateway.
-type S3Store struct {
+type XlatorS struct {
 	host string
 }
 
 // Name implements Gateway interface.
-func (g *S3Store) Name() string {
+func (g *XlatorS) Name() string {
 	return minio.S3BackendGateway
 }
 
@@ -146,7 +146,7 @@ func newS3(urlStr string, tripper http.RoundTripper) (*miniogo.Core, error) {
 }
 
 // NewGatewayLayer returns s3 ObjectLayer.
-func (g *S3Store) NewGatewayLayer(creds auth.Credentials) (minio.ObjectLayer, error) {
+func (g *XlatorS) NewGatewayLayer(creds auth.Credentials) (minio.ObjectLayer, error) {
 	metrics := minio.NewMetrics()
 
 	t := &minio.MetricsTransport{
@@ -193,7 +193,7 @@ func (g *S3Store) NewGatewayLayer(creds auth.Credentials) (minio.ObjectLayer, er
 }
 
 // Production - s3 gateway is production ready.
-func (g *S3Store) Production() bool {
+func (g *XlatorS) Production() bool {
 	return true
 }
 

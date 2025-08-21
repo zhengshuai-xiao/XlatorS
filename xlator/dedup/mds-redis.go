@@ -14,7 +14,7 @@ import (
 	"github.com/google/uuid"
 	minio "github.com/minio/minio/cmd"
 	redis "github.com/redis/go-redis/v9"
-	"github.com/zhengshuai-xiao/S3Store/internal"
+	"github.com/zhengshuai-xiao/XlatorS/internal"
 )
 
 /*
@@ -313,7 +313,7 @@ func (m *MDSRedis) Init(format *Format, force bool) error {
 	} else if err == redis.Nil {
 		// create new format
 		format = &Format{
-			Name:             "S3Store",
+			Name:             "XlatorS",
 			UUID:             uuid.New().String(),
 			Storage:          "minio",
 			StorageClass:     "Single",

@@ -11,12 +11,12 @@ import (
 
 	miniogo "github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/s3utils"
-	"github.com/zhengshuai-xiao/S3Store/internal"
+	"github.com/zhengshuai-xiao/XlatorS/internal"
 
 	minio "github.com/minio/minio/cmd"
 	"github.com/minio/minio/pkg/auth"
 	"github.com/minio/minio/pkg/madmin"
-	S3client "github.com/zhengshuai-xiao/S3Store/pkg/s3client"
+	S3client "github.com/zhengshuai-xiao/XlatorS/pkg/s3client"
 )
 
 const (

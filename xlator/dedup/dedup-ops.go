@@ -9,8 +9,8 @@ import (
 	"time"
 
 	minio "github.com/minio/minio/cmd"
-	"github.com/zhengshuai-xiao/S3Store/internal"
-	S3client "github.com/zhengshuai-xiao/S3Store/pkg/s3client"
+	"github.com/zhengshuai-xiao/XlatorS/internal"
+	S3client "github.com/zhengshuai-xiao/XlatorS/pkg/s3client"
 )
 
 const (

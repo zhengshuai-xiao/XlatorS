@@ -1,4 +1,4 @@
-module github.com/zhengshuai-xiao/S3Store
+module github.com/zhengshuai-xiao/XlatorS
 
 go 1.24.6
 

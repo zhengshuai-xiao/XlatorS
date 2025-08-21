@@ -3,7 +3,7 @@ package dedup
 import (
 	"crypto/sha256"
 
-	"github.com/zhengshuai-xiao/S3Store/internal"
+	"github.com/zhengshuai-xiao/XlatorS/internal"
 )
 
 func CalcFP(buf []byte, c *Chunk) {

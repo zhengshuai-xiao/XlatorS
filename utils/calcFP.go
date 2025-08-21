@@ -8,8 +8,8 @@ import (
 	"io"
 	"os"
 
-	"github.com/zhengshuai-xiao/S3Store/internal"
-	"github.com/zhengshuai-xiao/S3Store/xlator/dedup"
+	"github.com/zhengshuai-xiao/XlatorS/internal"
+	"github.com/zhengshuai-xiao/XlatorS/xlator/dedup"
 )
 
 func CalcFP(buf []byte, c *dedup.Chunk) {

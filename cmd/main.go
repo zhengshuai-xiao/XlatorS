@@ -5,10 +5,10 @@ import (
 	"syscall"
 
 	"github.com/urfave/cli/v2"
-	"github.com/zhengshuai-xiao/S3Store/internal"
+	"github.com/zhengshuai-xiao/XlatorS/internal"
 )
 
-var logger = internal.GetLogger("s3store_cmd")
+var logger = internal.GetLogger("XlatorS_cmd")
 
 func Main(args []string) error {
 	// we have to call this because gspt removes all arguments
@@ -18,7 +18,7 @@ func Main(args []string) error {
 		Usage: "print version only",
 	}
 	app := &cli.App{
-		Name:                 "s3store",
+		Name:                 "xlators",
 		Usage:                "A POSIX file system built on Redis and object storage.",
 		Version:              internal.Version(),
 		Copyright:            "Apache License 2.0",

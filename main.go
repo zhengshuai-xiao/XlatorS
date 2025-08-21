@@ -5,11 +5,11 @@ package main
 import (
 	"os"
 
-	"github.com/zhengshuai-xiao/S3Store/cmd"
-	"github.com/zhengshuai-xiao/S3Store/internal"
+	"github.com/zhengshuai-xiao/XlatorS/cmd"
+	"github.com/zhengshuai-xiao/XlatorS/internal"
 )
 
-var logger = internal.GetLogger("s3store_main")
+var logger = internal.GetLogger("XlatorS_main")
 
 func main() {
 	//internal.SetLogLevel(logrus.TraceLevel)

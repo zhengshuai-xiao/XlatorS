@@ -16,8 +16,8 @@ import (
 	xhttp "github.com/minio/minio/cmd/http"
 	"github.com/minio/minio/pkg/auth"
 	"github.com/minio/minio/pkg/bucket/policy"
-	"github.com/zhengshuai-xiao/S3Store/internal"
-	S3client "github.com/zhengshuai-xiao/S3Store/pkg/s3client"
+	"github.com/zhengshuai-xiao/XlatorS/internal"
+	S3client "github.com/zhengshuai-xiao/XlatorS/pkg/s3client"
 
 	minio "github.com/minio/minio/cmd"
 )

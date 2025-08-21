@@ -203,13 +203,13 @@ func GetDefaultLogDir() string {
 			logger.Warn(err)
 			homeDir = defaultLogDir
 		}
-		defaultLogDir = path.Join(homeDir, ".s3store")
+		defaultLogDir = path.Join(homeDir, ".xlators")
 	case "windows":
 		homeDir, err := os.UserHomeDir()
 		if err != nil {
 			logger.Fatalf("%v", err)
 		}
-		defaultLogDir = path.Join(homeDir, ".s3store")
+		defaultLogDir = path.Join(homeDir, ".xlators")
 	}
 	return defaultLogDir
 }

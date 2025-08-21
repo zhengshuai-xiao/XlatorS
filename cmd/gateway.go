@@ -9,9 +9,9 @@ import (
 	minio "github.com/minio/minio/cmd"
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v2"
-	"github.com/zhengshuai-xiao/S3Store/internal"
-	"github.com/zhengshuai-xiao/S3Store/xlator/dedup"
-	s3forward "github.com/zhengshuai-xiao/S3Store/xlator/s3forward"
+	"github.com/zhengshuai-xiao/XlatorS/internal"
+	"github.com/zhengshuai-xiao/XlatorS/xlator/dedup"
+	s3forward "github.com/zhengshuai-xiao/XlatorS/xlator/s3forward"
 )
 
 func cmdGateway() *cli.Command {
@@ -19,7 +19,7 @@ func cmdGateway() *cli.Command {
 		&cli.StringFlag{
 			Name:  "log",
 			Usage: "path for gateway log",
-			Value: path.Join(internal.GetDefaultLogDir(), "s3store-gateway.log"),
+			Value: path.Join(internal.GetDefaultLogDir(), "xlators-gateway.log"),
 		},
 		&cli.StringFlag{
 			Name:  "loglevel",
@@ -28,7 +28,7 @@ func cmdGateway() *cli.Command {
 		},
 		&cli.StringFlag{
 			Name:  "access-log",
-			Usage: "path for s3store access log",
+			Usage: "path for xlators access log",
 		},
 		&cli.BoolFlag{
 			Name:    "background",
@@ -118,7 +118,7 @@ func cmdGateway() *cli.Command {
 			Examples:
 			$ export MINIO_ROOT_USER=admin
 			$ export MINIO_ROOT_PASSWORD=12345678
-			$ s3store gateway redis://localhost localhost:9000`,
+			$ xlators gateway redis://localhost localhost:9000`,
 		Flags: expandFlags(selfFlags, clientFlags(0), shareInfoFlags()),
 	}
 
@@ -214,7 +214,7 @@ func gateway(c *cli.Context) error {
 		return err
 	}
 	if readonly {
-		os.Setenv("JUICEFS_META_READ_ONLY", "1")
+		os.Setenv("META_READ_ONLY", "1")
 	} else {
 		/*if _, err := s3sGateway.GetBucketInfo(context.Background(), minio.MinioMetaBucket); errors.As(err, &minio.BucketNotFound{}) {
 			if err := s3sGateway.MakeBucketWithLocation(context.Background(), minio.MinioMetaBucket, minio.BucketOptions{}); err != nil {
@@ -255,7 +255,7 @@ func gateway(c *cli.Context) error {
 
 func gateway2(ctx *mcli.Context) error {
 	logger.Info("start gateway2")
-	minio.ServerMain4S3Store(ctx, xobject)
+	minio.ServerMain4XlatorS(ctx, xobject)
 	logger.Info("end gateway2")
 	return nil
 }

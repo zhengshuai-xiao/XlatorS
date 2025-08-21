@@ -31,7 +31,7 @@ go.work.sum
 # .idea/
 # .vscode/
 
-s3store
+xlators
 upload_file
 calc_fp
 test
