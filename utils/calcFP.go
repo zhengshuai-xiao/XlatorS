@@ -9,7 +9,7 @@ import (
 	"os"
 
 	"github.com/zhengshuai-xiao/S3Store/internal"
-	"github.com/zhengshuai-xiao/S3Store/pkg/dedup"
+	"github.com/zhengshuai-xiao/S3Store/xlator/dedup"
 )
 
 func CalcFP(buf []byte, c *dedup.Chunk) {

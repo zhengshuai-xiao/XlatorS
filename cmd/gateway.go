@@ -10,8 +10,8 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v2"
 	"github.com/zhengshuai-xiao/S3Store/internal"
-	"github.com/zhengshuai-xiao/S3Store/pkg/dedup"
-	s3forward "github.com/zhengshuai-xiao/S3Store/pkg/s3forward"
+	"github.com/zhengshuai-xiao/S3Store/xlator/dedup"
+	s3forward "github.com/zhengshuai-xiao/S3Store/xlator/s3forward"
 )
 
 func cmdGateway() *cli.Command {
