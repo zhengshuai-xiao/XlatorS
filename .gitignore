@@ -33,3 +33,7 @@ go.work.sum
 
 s3store
 upload_file
+calc_fp
+test
+
+test.go

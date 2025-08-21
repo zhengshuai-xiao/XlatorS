@@ -19,11 +19,14 @@ type MDS interface {
 	MakeBucket(bucket string) error
 	DelBucket(bucket string) error
 	ListBuckets() ([]minio.BucketInfo, error)
-	ListObjects(bucket string) ([]minio.ObjectInfo, error)
+	ListObjects(bucket string, prefix string) ([]minio.ObjectInfo, error)
+	DelObjectMeta(bucket string, obj string) ([]int64, error)
 	PutObjectMeta(object minio.ObjectInfo) error
-	GetObjectMeta(object minio.ObjectInfo) error
+	GetObjectMeta(object *minio.ObjectInfo) error
 	BucketExist(bucket string) (bool, error)
-	GetIncreasedDOID() (string, error)
+	GetIncreasedDOID() (int64, error)
+	GetDObjNameInMDS(id int64) string
+	GetDOIDFromDObjName(string) (int64, error)
 	GetIncreasedManifestID() (string, error)
 	WriteManifest(manifestid string, chunks []Chunk) error
 	GetManifest(manifestid string) (chunks []ChunkInManifest, err error)

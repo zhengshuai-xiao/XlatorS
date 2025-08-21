@@ -20,8 +20,9 @@ import (
 )
 
 const (
-	sep        = "/"
-	XlatorName = "Dedup"
+	sep           = "/"
+	XlatorName    = "Dedup"
+	BackendBucket = "xzstest"
 )
 
 type XlatorDedup struct {
@@ -61,16 +62,40 @@ func NewXlatorDedup(gConf *internal.Config) (*XlatorDedup, error) {
 		logger.Errorf("failed to create S3 client: %v", err)
 		return nil, err
 	}
-	return &XlatorDedup{
+
+	xlatorDedup := &XlatorDedup{
 		Client: client,
 		HTTPClient: &http.Client{
 			Transport: t,
 		},
 		Metrics:   metrics,
 		Mdsclient: redismeta,
-	}, nil
+	}
+
+	err = xlatorDedup.CreateBackendBucket()
+	if err != nil {
+		logger.Errorf("failed to create backend bucket: %v", err)
+		return xlatorDedup, err
+	}
+	return xlatorDedup, nil
 }
 
+func (x *XlatorDedup) CreateBackendBucket() (err error) {
+	ctx := context.Background()
+	var ok bool
+	if ok, err = x.Client.BucketExists(ctx, BackendBucket); err != nil {
+		return minio.ErrorRespToObjectError(err, BackendBucket)
+	}
+	if !ok {
+		err = x.Client.MakeBucket(ctx, BackendBucket, miniogo.MakeBucketOptions{Region: "us-east-1", ObjectLocking: false})
+		if err != nil {
+			return minio.ErrorRespToObjectError(err, BackendBucket)
+		}
+		logger.Infof("Created backend bucket: %s", BackendBucket)
+	}
+
+	return nil
+}
 func (x *XlatorDedup) Shutdown(ctx context.Context) error {
 	return nil
 }
@@ -115,10 +140,10 @@ func (x *XlatorDedup) DeleteBucket(ctx context.Context, bucket string, forceDele
 	}
 
 	//delete the bucket in backend
-	err = x.Client.RemoveBucket(ctx, bucket)
+	/*err = x.Client.RemoveBucket(ctx, bucket)
 	if err != nil {
 		return minio.ErrorRespToObjectError(err, bucket)
-	}
+	}*/
 	return nil
 }
 
@@ -143,14 +168,15 @@ func (x *XlatorDedup) MakeBucketWithLocation(ctx context.Context, bucket string,
 		return minio.ErrorRespToObjectError(err, bucket)
 	}
 
-	err = x.Client.MakeBucket(ctx, bucket, miniogo.MakeBucketOptions{Region: opts.Location})
+	/*err = x.Client.MakeBucket(ctx, bucket, miniogo.MakeBucketOptions{Region: opts.Location})
 	if err != nil {
 		return minio.ErrorRespToObjectError(err, bucket)
-	}
+	}*/
 
 	return err
 }
 func (x *XlatorDedup) GetBucketInfo(ctx context.Context, bucket string) (bi minio.BucketInfo, err error) {
+	logger.Tracef("%s: enter", internal.GetCurrentFuncName())
 	//bucket = x.Mdsclient.ConvertBucketName(bucket)
 	err = x.isValidBucketName(bucket)
 	if err != nil {
@@ -163,17 +189,8 @@ func (x *XlatorDedup) GetBucketInfo(ctx context.Context, bucket string) (bi mini
 	if err != nil {
 		// Listbuckets may be disallowed, proceed to check if
 		// bucket indeed exists, if yes return success.
-		var ok bool
-		if ok, err = x.Client.BucketExists(ctx, bucket); err != nil {
-			return bi, minio.ErrorRespToObjectError(err, bucket)
-		}
-		if !ok {
-			return bi, minio.BucketNotFound{Bucket: bucket}
-		}
-		return minio.BucketInfo{
-			Name:    bucket,
-			Created: time.Now().UTC(),
-		}, nil
+		logger.Errorf("failed to listBuckets from MDS")
+		return bi, err
 	}
 
 	for _, bi := range buckets {
@@ -191,6 +208,7 @@ func (x *XlatorDedup) GetBucketInfo(ctx context.Context, bucket string) (bi mini
 }
 
 func (x *XlatorDedup) ListBuckets(ctx context.Context) ([]minio.BucketInfo, error) {
+	logger.Tracef("%s: enter", internal.GetCurrentFuncName())
 	buckets, err := x.Mdsclient.ListBuckets()
 
 	//buckets, err := x.Client.ListBuckets(ctx)
@@ -210,15 +228,8 @@ func (x *XlatorDedup) ListBuckets(ctx context.Context) ([]minio.BucketInfo, erro
 	return b, err
 }
 
-func (x *XlatorDedup) GetObject(ctx context.Context, bucket, object string, startOffset, length int64, writer io.Writer, etag string, opts minio.ObjectOptions) (err error) {
-	return
-}
-
-func (x *XlatorDedup) GetObjectInfo(ctx context.Context, bucket, object string, opts minio.ObjectOptions) (objInfo minio.ObjectInfo, err error) {
-	return
-}
-
 func (x *XlatorDedup) isValidBucketName(bucket string) error {
+	logger.Tracef("%s: enter", internal.GetCurrentFuncName())
 	if s3utils.CheckValidBucketNameStrict(bucket) != nil {
 		return minio.BucketNameInvalid{Bucket: bucket}
 	}
@@ -231,6 +242,7 @@ func (x *XlatorDedup) isValidBucketName(bucket string) error {
 }
 
 func (x *XlatorDedup) PutObject(ctx context.Context, bucket string, object string, r *minio.PutObjReader, opts minio.ObjectOptions) (objInfo minio.ObjectInfo, err error) {
+	logger.Tracef("%s: enter", internal.GetCurrentFuncName())
 	err = x.isValidBucketName(bucket)
 	if err != nil {
 		logger.Errorf("this is a invalid bucket name [%s]", bucket)
@@ -241,7 +253,7 @@ func (x *XlatorDedup) PutObject(ctx context.Context, bucket string, object strin
 		logger.Errorf("failed to get increased manifest ID: %v", err)
 		return
 	}
-	logger.Info("PutObject 1")
+	logger.Trace("PutObject 1")
 	isDir := false
 	var etag string
 	if strings.HasSuffix(object, sep) {
@@ -268,36 +280,51 @@ func (x *XlatorDedup) PutObject(ctx context.Context, bucket string, object strin
 		UserDefined: minio.CleanMetadata(opts.UserDefined),
 		IsLatest:    true,
 	}
-	logger.Info("PutObject 2")
+	//objInfo.UserDefined["BackendBucket"] = BackendBucket
+	logger.Trace("PutObject 2")
 	err = x.writeObj(ctx, r, &objInfo)
 	if err != nil {
 		logger.Errorf("failed to write data to object %s: %v", object, err)
 		return objInfo, err
 	}
-	logger.Info("PutObject 3")
+	logger.Trace("PutObject 3")
 	//commit meta data
 	err = x.Mdsclient.PutObjectMeta(objInfo)
 	if err != nil {
 		logger.Errorf("failed to commit metadata for object %s: %v", object, err)
 		return objInfo, err
 	}
-	logger.Info("PutObject 4")
+	logger.Trace("PutObject 4")
 	return objInfo, nil
 }
 
 func (x *XlatorDedup) NewMultipartUpload(ctx context.Context, bucket string, object string, opts minio.ObjectOptions) (uploadID string, err error) {
+	logger.Tracef("%s: enter", internal.GetCurrentFuncName())
 	return
 }
 
 func (x *XlatorDedup) NewNSLock(bucket string, objects ...string) minio.RWLocker {
+	logger.Tracef("%s: enter", internal.GetCurrentFuncName())
 	return &internal.StoreFLock{Owner: 123, Readonly: false}
 }
 
 // DeleteObject deletes a blob in bucket
 func (x *XlatorDedup) DeleteObject(ctx context.Context, bucket string, object string, opts minio.ObjectOptions) (minio.ObjectInfo, error) {
-	err := x.Client.RemoveObject(ctx, bucket, object, miniogo.RemoveObjectOptions{})
+	logger.Tracef("%s: enter", internal.GetCurrentFuncName())
+	//delete in mds
+	//delete manifest
+	dobjIDs, err := x.Mdsclient.DelObjectMeta(bucket, object)
 	if err != nil {
 		return minio.ObjectInfo{}, minio.ErrorRespToObjectError(err, bucket, object)
+	}
+	//get unique DObjID from chunks
+	//delete the reference of dobjIDs
+	for _, objid := range dobjIDs {
+		/*err = x.Client.RemoveObject(ctx, bucket, x.Mdsclient.GetDObjNameInMDS(objid), miniogo.RemoveObjectOptions{})
+		if err != nil {
+			return minio.ObjectInfo{}, minio.ErrorRespToObjectError(err, bucket, object)
+		}*/
+		logger.Tracef("delete the reference of data object:%s", x.Mdsclient.GetDObjNameInMDS(objid))
 	}
 
 	return minio.ObjectInfo{
@@ -307,6 +334,7 @@ func (x *XlatorDedup) DeleteObject(ctx context.Context, bucket string, object st
 }
 
 func (x *XlatorDedup) DeleteObjects(ctx context.Context, bucket string, objects []minio.ObjectToDelete, opts minio.ObjectOptions) ([]minio.DeletedObject, []error) {
+	logger.Tracef("%s: enter", internal.GetCurrentFuncName())
 	errs := make([]error, len(objects))
 	dobjects := make([]minio.DeletedObject, len(objects))
 	for idx, object := range objects {
@@ -319,11 +347,36 @@ func (x *XlatorDedup) DeleteObjects(ctx context.Context, bucket string, objects 
 	}
 	return dobjects, errs
 }
+
+func (x *XlatorDedup) GetObject(ctx context.Context, bucket, object string, startOffset, length int64, writer io.Writer, etag string, opts minio.ObjectOptions) (err error) {
+	logger.Tracef("%s: enter", internal.GetCurrentFuncName())
+	return
+}
+
+func (x *XlatorDedup) GetObjectInfo(ctx context.Context, bucket, object string, opts minio.ObjectOptions) (objInfo minio.ObjectInfo, err error) {
+	logger.Tracef("%s: enter", internal.GetCurrentFuncName())
+	return
+}
+
 func (x *XlatorDedup) GetObjectNInfo(ctx context.Context, bucket, object string, rs *minio.HTTPRangeSpec, h http.Header, lockType minio.LockType, opts minio.ObjectOptions) (gr *minio.GetObjectReader, err error) {
+	logger.Tracef("%s: enter", internal.GetCurrentFuncName())
 	return nil, minio.NotImplemented{}
 }
 
 // ListObjects lists all blobs in S3 bucket filtered by prefix
-func (x *XlatorDedup) ListObjects(ctx context.Context, bucket string, prefix string, marker string, delimiter string, maxKeys int) (loi minio.ListObjectsInfo, e error) {
-	return loi, minio.NotImplemented{}
+func (x *XlatorDedup) ListObjects(ctx context.Context, bucket string, prefix string, marker string, delimiter string, maxKeys int) (loi minio.ListObjectsInfo, err error) {
+	logger.Tracef("%s: enter", internal.GetCurrentFuncName())
+	loi.IsTruncated = false
+	loi.NextMarker = ""
+
+	objects, err := x.Mdsclient.ListObjects(bucket, prefix)
+
+	for _, obj := range objects {
+		loi.Objects = append(loi.Objects, obj)
+		logger.Tracef("ListObjects:add obj:%s", obj.Name)
+	}
+	if err != nil {
+		return loi, err
+	}
+	return loi, nil
 }

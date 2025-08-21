@@ -18,43 +18,52 @@ import (
 )
 
 /*
-	Node:       i$inode -> Attribute{type,mode,uid,gid,atime,mtime,ctime,nlink,length,rdev}
-	Dir:        d$inode -> {name -> {inode,type}}
-	Parent:     p$inode -> {parent -> count} // for hard links
-	File:       c$inode_$indx -> [Slice{pos,id,length,off,len}]
-	Symlink:    s$inode -> target
-	Xattr:      x$inode -> {name -> value}
-	Flock:      lockf$inode -> { $sid_$owner -> ltype }
-	POSIX lock: lockp$inode -> { $sid_$owner -> Plock(pid,ltype,start,end) }
-	Sessions:   sessions -> [ $sid -> heartbeat ]
-	sustained:  session$sid -> [$inode]
-	locked:     locked$sid -> { lockf$inode or lockp$inode }
+Node:       i$inode -> Attribute{type,mode,uid,gid,atime,mtime,ctime,nlink,length,rdev}
+Dir:        d$inode -> {name -> {inode,type}}
+Parent:     p$inode -> {parent -> count} // for hard links
+File:       c$inode_$indx -> [Slice{pos,id,length,off,len}]
+Symlink:    s$inode -> target
+Xattr:      x$inode -> {name -> value}
+Flock:      lockf$inode -> { $sid_$owner -> ltype }
+POSIX lock: lockp$inode -> { $sid_$owner -> Plock(pid,ltype,start,end) }
+Sessions:   sessions -> [ $sid -> heartbeat ]
+sustained:  session$sid -> [$inode]
+locked:     locked$sid -> { lockf$inode or lockp$inode }
 
-	Removed files: delfiles -> [$inode:$length -> seconds]
-	detached nodes: detachedNodes -> [$inode -> seconds]
-	Slices refs: sliceRef -> {k$sliceId_$size -> refcount}
+Removed files: delfiles -> [$inode:$length -> seconds]
+detached nodes: detachedNodes -> [$inode -> seconds]
+Slices refs: sliceRef -> {k$sliceId_$size -> refcount}
 
-	Dir data length:   dirDataLength -> { $inode -> length }
-	Dir used space:    dirUsedSpace -> { $inode -> usedSpace }
-	Dir used inodes:   dirUsedInodes -> { $inode -> usedInodes }
-	Quota:             dirQuota -> { $inode -> {maxSpace, maxInodes} }
-	Quota used space:  dirQuotaUsedSpace -> { $inode -> usedSpace }
-	Quota used inodes: dirQuotaUsedInodes -> { $inode -> usedInodes }
-	Acl: acl -> { $acl_id -> acl }
+Dir data length:   dirDataLength -> { $inode -> length }
+Dir used space:    dirUsedSpace -> { $inode -> usedSpace }
+Dir used inodes:   dirUsedInodes -> { $inode -> usedInodes }
+Quota:             dirQuota -> { $inode -> {maxSpace, maxInodes} }
+Quota used space:  dirQuotaUsedSpace -> { $inode -> usedSpace }
+Quota used inodes: dirQuotaUsedInodes -> { $inode -> usedInodes }
+Acl: acl -> { $acl_id -> acl }
 
-	Redis features:
-	  Sorted Set: 1.2+
-	  Hash Set: 4.0+
-	  Transaction: 2.2+
-	  Scripting: 2.6+
-	  Scan: 2.8+
+Redis features:
+
+	Sorted Set: 1.2+
+	Hash Set: 4.0+
+	Transaction: 2.2+
+	Scripting: 2.6+
+	Scan: 2.8+
 */
+const (
+	KeyExists  = 1
+	DOKeyWord  = "DataObj"
+	FPCacheKey = "FPCache"
+	BucketsKey = "Buckets"
+	ObjectFake = "ObjectFake"
+)
 
 type MDSRedis struct {
 	//*baseMeta
 	rdb          redis.UniversalClient
 	prefix       string //DB name
-	bucketPrefix string //buk:
+	bucketPrefix string //BUK
+	ObjectPrefic string //OBJ
 	shaLookup    string // The SHA returned by Redis for the loaded `scriptLookup`
 	shaResolve   string // The SHA returned by Redis for the loaded `scriptResolve`
 	metesetting  Format
@@ -229,6 +238,7 @@ func NewRedisMeta(driver, addr string, conf *Config) (MDS, error) {
 		rdb:          rdb,
 		prefix:       prefix,
 		bucketPrefix: prefix + "BUK",
+		ObjectPrefic: prefix + "OBJ",
 	}
 	//m.en = m
 	m.checkServerConfig()
@@ -288,17 +298,6 @@ func (m *MDSRedis) setting() string {
 	return m.prefix + "setting"
 }
 
-func (m *MDSRedis) convertBucketName(bucketname string) string {
-	return m.bucketPrefix + bucketname
-}
-func (m *MDSRedis) convertBucketNameBack(bucketname string) string {
-	return strings.TrimPrefix(bucketname, m.bucketPrefix)
-}
-
-func (m *MDSRedis) GetBucketPattern() string {
-	return m.bucketPrefix + "*"
-}
-
 func (m *MDSRedis) Init(format *Format, force bool) error {
 	ctx := context.Background()
 	body, err := m.rdb.Get(ctx, m.setting()).Bytes()
@@ -355,110 +354,237 @@ func (m *MDSRedis) Init(format *Format, force bool) error {
 
 func (m *MDSRedis) MakeBucket(bucket string) error {
 	ctx := context.Background()
-	bucket_in_redis := m.convertBucketName(bucket)
+
+	exists, err := m.rdb.HExists(ctx, BucketsKey, bucket).Result()
+	if err != nil {
+		logger.Errorf("MakeBucket:failed to check exist for bucket:%s, err:%s", bucket, err)
+		return err
+	}
+
+	if exists {
+		logger.Warnf("MakeBucket:bucket:%s already exists", bucket)
+		return err
+	}
+
 	bucketinfo := newBucketInfo(bucket)
 	jsonData, err := json.Marshal(bucketinfo)
 	if err != nil {
 		return err
 	}
-	logger.Infof("MDSRedis::MakeBucket[%s]: %s", bucket_in_redis, jsonData)
-	return m.rdb.Set(ctx, bucket_in_redis, jsonData, 0).Err()
+	logger.Infof("MDSRedis::MakeBucket[%s]: %s", bucket, jsonData)
+	err = m.rdb.HSet(ctx, BucketsKey, bucket, jsonData).Err()
+	if err != nil {
+		logger.Errorf("MDSRedis::failed to HSet bucket[%s] to %s: %s", bucket, BucketsKey, err)
+		return err
+	}
+	return nil
 }
 
 func (m *MDSRedis) DelBucket(bucket string) error {
 	ctx := context.Background()
-	bucket_in_redis := m.convertBucketName(bucket)
-	logger.Infof("MDSRedis::DelBucket[%s]", bucket_in_redis)
-
-	return m.rdb.Del(ctx, bucket_in_redis, "").Err()
+	objCount, err := m.rdb.HLen(ctx, bucket).Result()
+	if err != nil {
+		logger.Errorf("MDSRedis::failed to HLen bucket[%s]: %s", bucket, err)
+		return err
+	}
+	if objCount > 0 {
+		logger.Errorf("the bucket:%s is not empty(%d objects left)", bucket, objCount)
+		return fmt.Errorf("the bucket:%s is not empty(%d objects left)", bucket, objCount)
+	}
+	err = m.rdb.Del(ctx, bucket).Err()
+	if err != nil {
+		logger.Errorf("MDSRedis::failed to DelBucket[%s]: %s", bucket, err)
+		return err
+	}
+	err = m.rdb.HDel(ctx, BucketsKey, bucket).Err()
+	if err != nil {
+		logger.Errorf("MDSRedis::failed to DelBucket[%s] in %s: %s", bucket, BucketsKey, err)
+		return err
+	}
+	logger.Tracef("MDSRedis::successfully DelBucket[%s]", bucket)
+	return nil
 }
 
 func (m *MDSRedis) ListBuckets() ([]minio.BucketInfo, error) {
 	ctx := context.Background()
-	iter := m.rdb.Scan(ctx, 0, m.GetBucketPattern(), 0).Iterator()
-
+	buckets, err := m.rdb.HGetAll(ctx, BucketsKey).Result()
+	if err != nil {
+		logger.Errorf("MDSRedis::failed to ListBuckets: %s", err)
+		return nil, err
+	}
 	var result []minio.BucketInfo
-	for iter.Next(ctx) {
-		bucket := iter.Val()
-		jasondata, err := m.rdb.Get(ctx, bucket).Result()
-		if err != nil {
-			logger.Errorf("MDSRedis::ListBuckets: failed to list members of bucket(%s): %s", bucket, err)
-			continue
-		}
+
+	for bucket, value := range buckets {
 		var bucketinfo BucketInfo
-		if err := json.Unmarshal([]byte(jasondata), &bucketinfo); err != nil {
-			logger.Errorf("MDSRedis::ListBuckets: failed to unmarshal bucket info(%s): %s", jasondata, err)
+		if err := json.Unmarshal([]byte(value), &bucketinfo); err != nil {
+			logger.Errorf("MDSRedis::ListBuckets: failed to unmarshal bucket info(%s): %s", bucket, err)
 			continue
 		}
 		result = append(result, minio.BucketInfo{Name: bucketinfo.Name,
 			Created: bucketinfo.Created,
 		})
-		logger.Infof("MDSRedis::ListBuckets: find bucket name:%s", bucketinfo.Name)
+		logger.Tracef("MDSRedis::ListBuckets: %s: %s", bucket, value)
 	}
 
 	return result, nil
 }
 
-func (m *MDSRedis) ListObjects(bucket string) ([]minio.ObjectInfo, error) {
-	/*ctx := context.Background()
-	objects, err := m.rdb.SMembers(ctx, m.objectKey(bucket)).Result()
+func (m *MDSRedis) ListObjects(bucket string, prefix string) (result []minio.ObjectInfo, err error) {
+	ctx := context.Background()
+	objects, err := m.rdb.HGetAll(ctx, bucket).Result()
 	if err != nil {
+		logger.Errorf("failed to HGetAll bucket: %s, err: %s", bucket, err)
 		return nil, err
 	}
-	var result []minio.ObjectInfo
-	for _, o := range objects {
-		result = append(result, minio.ObjectInfo{Name: o})
-	}*/
-	return nil, nil
+
+	for key, value := range objects {
+		if !strings.HasPrefix(key, prefix) {
+			continue
+		}
+		var objectInfo minio.ObjectInfo
+		if err := json.Unmarshal([]byte(value), &objectInfo); err != nil {
+			logger.Errorf("failed to unmarshal object info [key:%s], err: %s", key, err)
+			continue
+		}
+		result = append(result, objectInfo)
+	}
+
+	return result, nil
 }
 
 func (m *MDSRedis) PutObjectMeta(object minio.ObjectInfo) error {
 	ctx := context.Background()
+
 	jsondata, err := json.Marshal(object)
 	if err != nil {
 		return err
 	}
-	return m.rdb.Set(ctx, m.objectKey(object), jsondata, 0).Err()
+	err = m.rdb.HSet(ctx, object.Bucket, object.Name, jsondata).Err()
+	if err != nil {
+		logger.Errorf("MDSRedis::failed to HSet object[%s] into bucket[%s] : %s", object.Name, object.Bucket, err)
+		return err
+	}
+
+	return nil
 }
 
-func (m *MDSRedis) GetObjectMeta(object minio.ObjectInfo) error {
+func (m *MDSRedis) GetObjectMeta(object *minio.ObjectInfo) error {
 	ctx := context.Background()
-
-	obj_info, err := m.rdb.Get(ctx, m.objectKey(object)).Result()
+	logger.Tracef("GetObjectMeta:objectKey=%s", object.Name)
+	obj_info, err := m.rdb.HGet(ctx, object.Bucket, object.Name).Result()
 	if err != nil {
 		return err
 	}
 	if len(obj_info) == 0 {
 		return minio.ObjectNotFound{Bucket: object.Bucket, Object: object.Name}
 	}
-	if len(obj_info) > 1 {
-		return errors.New("GetObjectMeta: multiple objects found")
-	}
+
 	return json.Unmarshal([]byte(obj_info), &object)
 }
 
-func (m *MDSRedis) objectKey(object minio.ObjectInfo) string {
-	return fmt.Sprintf("%s:%s", m.bucketPrefix, object.Name)
+func (m *MDSRedis) DelObjectMeta(bucket string, obj string) ([]int64, error) {
+	ctx := context.Background()
+	logger.Tracef("GetObjectMeta:bucket:%s,object:%s", bucket, obj)
+	objInfo := minio.ObjectInfo{
+		Bucket: bucket,
+		Name:   obj,
+	}
+	objKey := objInfo.Name
+	err := m.GetObjectMeta(&objInfo)
+	if err != nil {
+		logger.Errorf("failed to GetObjectMeta object:%s", objKey)
+		return nil, err
+	}
+	//get manifest
+	mfid := objInfo.UserTags
+	chunks, err := m.GetManifest(mfid)
+	if err != nil {
+		logger.Errorf("failed to GetManifest[%s], err:%s", mfid, err)
+		return nil, err
+	}
+	//TODO: get all DObj?
+	set := internal.NewInt64Set()
+	for _, chunk := range chunks {
+		set.Add(int64(chunk.DOid))
+	}
+	dobjIDs := set.Elements()
+	//delete minifest
+	err = m.rdb.Del(ctx, mfid).Err()
+	if err != nil {
+		logger.Errorf("failed to delete manifest:%s, err:%s", mfid, err)
+		return dobjIDs, err
+	}
+	//delete objKey
+	err = m.rdb.HDel(ctx, bucket, objKey).Err()
+	if err != nil {
+		logger.Errorf("failed to delete object[%s] meta, err:%s", objKey, err)
+		return dobjIDs, err
+	}
+	return dobjIDs, nil
 }
 
+/*
+	func (m *MDSRedis) extractObjectName(objInMDS string) (string, error) {
+		//fin the second /
+		first := strings.Index(objInMDS, "/")
+		if first == -1 {
+			return "", fmt.Errorf("Cannot find the 1st '/' in %s", objInMDS)
+		}
+		second := strings.Index(objInMDS[first+1:], "/")
+		if second == -1 {
+			return "", fmt.Errorf("Cannot find the 2nd '/' in %s", objInMDS)
+		}
+		secondPos := first + 1 + second
+		logger.Tracef("extractObjectName:objInMDS:%s, result:%s", objInMDS, objInMDS[secondPos+1:])
+		return objInMDS[secondPos+1:], nil
+	}
+
+	func (m *MDSRedis) objectKeyPattern(bucket string) string {
+		return fmt.Sprintf("%s/%s/*", m.ObjectPrefic, bucket)
+	}
+*/
 func (m *MDSRedis) BucketExist(bucket string) (bool, error) {
 	ctx := context.Background()
-	bucket_in_redis := m.convertBucketName(bucket)
-	_, err := m.rdb.Get(ctx, bucket_in_redis).Result()
-	if err == redis.Nil {
-		return false, nil
+
+	exists, err := m.rdb.HExists(ctx, BucketsKey, bucket).Result()
+	if err != nil {
+		logger.Errorf("MakeBucket:failed to check exist for bucket:%s, err:%s", bucket, err)
+		return false, err
 	}
-	return err == nil, err
+
+	return exists, nil
 }
 
-func (m *MDSRedis) GetIncreasedDOID() (string, error) {
+func (m *MDSRedis) GetIncreasedDOID() (int64, error) {
 	ctx := context.Background()
 
 	id, err := m.rdb.Incr(ctx, doidkey).Result()
 	if err != nil {
-		return "", err
+		return 0, err
 	}
-	return fmt.Sprintf("DataObj%d", id), nil
+	return id, nil
+}
+func (m *MDSRedis) GetDObjNameInMDS(id int64) string {
+
+	return fmt.Sprintf("%s%d", DOKeyWord, id)
+}
+
+func (m *MDSRedis) GetDOIDFromDObjName(objName string) (num int64, err error) {
+
+	if len(objName) <= len(DOKeyWord) || objName[:len(DOKeyWord)] != DOKeyWord {
+		return 0, fmt.Errorf("ObjName[%s] is not starting with %s", objName, DOKeyWord)
+	}
+
+	numStr := objName[len(DOKeyWord):]
+	if numStr == "" {
+		return 0, fmt.Errorf("there is no num")
+	}
+
+	num, err = strconv.ParseInt(numStr, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("the num[%s] is not valid: %w", numStr, err)
+	}
+	return
 }
 
 func (m *MDSRedis) GetIncreasedManifestID() (string, error) {
@@ -470,10 +596,12 @@ func (m *MDSRedis) GetIncreasedManifestID() (string, error) {
 	}
 	return fmt.Sprintf("Manifest%d", id), nil
 }
+
 func (m *MDSRedis) WriteManifest(manifestid string, chunks []Chunk) error {
 	ctx := context.Background()
 	for _, chunk := range chunks {
-		str, err := internal.SerializeToString(ChunkInManifest{FP: chunk.FP, DOid: chunk.DOid})
+		str, err := internal.SerializeToString(ChunkInManifest{FP: chunk.FP, Len: chunk.Len, DOid: chunk.DOid,
+			OffInDOid: chunk.OffInDOid, LenInDOid: chunk.LenInDOid})
 		_, err = m.rdb.RPush(ctx, manifestid, str).Result()
 		if err != nil {
 			return err
@@ -503,29 +631,64 @@ func (m *MDSRedis) GetManifest(manifestid string) (chunks []ChunkInManifest, err
 }
 
 func (m *MDSRedis) DedupFPs(chunks []Chunk) error {
-	ctx := context.Background()
 	//pipe := m.rdb.Pipeline()
 
 	for i, chunk := range chunks {
-		val, err := m.rdb.Get(ctx, chunk.FP).Result()
-		if err != nil {
-			logger.Errorf("failed to get fingerprint for chunk(%d): %v", i, err)
-			chunks[i].Deduped = false
-			continue
+
+		fps := m.getFingerprint(chunk.FP)
+		if fps != nil {
+			chunks[i].DOid = fps.DOid
+			chunks[i].LenInDOid = fps.LenInDOid
+			chunks[i].OffInDOid = fps.OffInDOid
+			logger.Tracef("DedupFPs:found existed fp:%s, LenInDOid:%d, OffInDOid:%d", internal.StringToHex(chunk.FP), chunks[i].LenInDOid, chunks[i].OffInDOid)
 		}
-		chunks[i].Deduped = true
-		parsedDOid, _ := strconv.ParseInt(val, 10, 64)
-		chunks[i].DOid = uint64(parsedDOid)
 	}
 	return nil
 }
 
 func (m *MDSRedis) InsertFPs(chunks []ChunkInManifest) error {
-	ctx := context.Background()
-	pipe := m.rdb.Pipeline()
+	//pipe := m.rdb.Pipeline()
+
 	for _, chunk := range chunks {
-		pipe.Set(ctx, chunk.FP, chunk.DOid, 0)
+		//pipe.Set(ctx, getFPNameInMDS(chunk.FP), str, 0)
+		err := m.setFingerprint(chunk.FP, FPValInMDS{DOid: chunk.DOid, OffInDOid: chunk.OffInDOid, LenInDOid: chunk.LenInDOid})
+		if err != nil {
+			return err
+		}
+		logger.Tracef("InsertFPs: fp[%s], DOid:%d", internal.StringToHex(chunk.FP), chunk.DOid)
 	}
-	_, err := pipe.Exec(ctx)
-	return err
+	//_, err := pipe.Exec(ctx)
+	return nil
+}
+
+// 1: found, 0 is not
+func (m *MDSRedis) getFingerprint(fp string) *FPValInMDS {
+	ctx := context.Background()
+	fp_val, err := m.rdb.HGet(ctx, FPCacheKey, fp).Result()
+	if err != nil {
+		if err == redis.Nil {
+			//not existed
+			return nil
+		}
+		logger.Errorf("setFingerprint: failed to HGet(%s). err:%s", internal.StringToHex(fp), err)
+		return nil
+	}
+	fps := &FPValInMDS{}
+	err = internal.DeserializeFromString(fp_val, fps)
+	if err != nil {
+		logger.Errorf("setFingerprint: failed to DeserializeFromString. err:%s", err)
+		return nil
+	}
+	logger.Tracef("found fp:%s", internal.StringToHex(fp))
+	return fps
+}
+
+func (m *MDSRedis) setFingerprint(fp string, dpval FPValInMDS) error {
+	ctx := context.Background()
+	str_val, err := internal.SerializeToString(dpval)
+	if err != nil {
+		logger.Errorf("setFingerprint: failed to SerializeToString. err:%s", err)
+		return err
+	}
+	return m.rdb.HSet(ctx, FPCacheKey, fp, str_val).Err()
 }

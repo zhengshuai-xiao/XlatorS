@@ -66,10 +66,12 @@ func (x *XlatorDedup) truncateDObj(ctx context.Context, dobj *DObj) (err error) 
 	return nil
 }
 func (x *XlatorDedup) newDObj(dobj *DObj) (err error) {
-	dobj.dobj_key, err = x.Mdsclient.GetIncreasedDOID()
+	doid, err := x.Mdsclient.GetIncreasedDOID()
 	if err != nil {
+		logger.Errorf("failed to GetIncreasedDOID, err:%s", err)
 		return
 	}
+	dobj.dobj_key = x.Mdsclient.GetDObjNameInMDS(doid)
 	dobj.path = filePath + dobj.dobj_key
 	dobj.filer, err = os.OpenFile(dobj.path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
 	if err != nil {
@@ -79,6 +81,7 @@ func (x *XlatorDedup) newDObj(dobj *DObj) (err error) {
 	dobj.filer.Write(buf_off[:])
 	dobj.dob_offset = 8
 	dobj.fps = []fpinDObj{}
+	logger.Tracef("newDObj, dobj_key:%s", dobj.dobj_key)
 
 	return nil
 }
@@ -94,7 +97,7 @@ func (x *XlatorDedup) writeDObj(ctx context.Context, dobj *DObj, buf []byte, chu
 		if chunks[i].Deduped {
 			continue
 		}
-		if dobj.dob_offset+uint64(chunks[i].len) >= maxSize {
+		if dobj.dob_offset+uint64(chunks[i].Len) >= maxSize {
 			err = x.truncateDObj(ctx, dobj)
 			if err != nil {
 				return
@@ -106,11 +109,18 @@ func (x *XlatorDedup) writeDObj(ctx context.Context, dobj *DObj, buf []byte, chu
 			}
 		}
 
-		_, err = internal.WriteAll(dobj.filer, buf[chunks[i].off:chunks[i].off+chunks[i].len])
+		_, err = internal.WriteAll(dobj.filer, buf[chunks[i].off:chunks[i].off+chunks[i].Len])
 		if err != nil {
 			return
 		}
-		dobj.dob_offset += uint64(chunks[i].len)
+		doid, err := x.Mdsclient.GetDOIDFromDObjName(dobj.dobj_key)
+		if err != nil {
+			return err
+		}
+		chunks[i].DOid = uint64(doid)
+		chunks[i].OffInDOid = dobj.dob_offset
+		chunks[i].LenInDOid = chunks[i].Len
+		dobj.dob_offset += uint64(chunks[i].Len)
 	}
 	return err
 }
@@ -121,7 +131,7 @@ func (x *XlatorDedup) writeObj(ctx context.Context, r *minio.PutObjReader, objIn
 	cdc := FixedCDC{Chunksize: 128 * 1024}
 	var buf = buffPool.Get().(*[]byte)
 	defer buffPool.Put(buf)
-	dobj := &DObj{dobj_key: "", path: "", dob_offset: 0, filer: nil}
+	dobj := &DObj{bucket: BackendBucket, dobj_key: "", path: "", dob_offset: 0, filer: nil}
 	for {
 		var n int
 		n, err = io.ReadFull(r, *buf)
@@ -133,15 +143,13 @@ func (x *XlatorDedup) writeObj(ctx context.Context, r *minio.PutObjReader, objIn
 		}
 		//chunk
 		chunks, err := cdc.Chunking((*buf)[:n])
+		if err != nil {
+			return err
+		}
 		//calc fp
 		CalcFPs((*buf)[:n], chunks)
 		//search fp
 		err = x.Mdsclient.DedupFPs(chunks)
-		if err != nil {
-			return err
-		}
-		//append to manifest
-		err = x.Mdsclient.WriteManifest(objInfo.UserTags, chunks)
 		if err != nil {
 			return err
 		}
@@ -150,6 +158,12 @@ func (x *XlatorDedup) writeObj(ctx context.Context, r *minio.PutObjReader, objIn
 		if err != nil {
 			break
 		}
+		//append to manifest
+		err = x.Mdsclient.WriteManifest(objInfo.UserTags, chunks)
+		if err != nil {
+			return err
+		}
+
 	}
 	err = x.truncateDObj(ctx, dobj)
 	if err != nil {

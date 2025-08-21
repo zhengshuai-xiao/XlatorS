@@ -12,11 +12,11 @@ func (f *FixedCDC) Chunking(buf []byte) (chunks []Chunk, err error) {
 	cur := uint64(0)
 	for {
 		if cur+f.Chunksize > len {
-			chunks = append(chunks, Chunk{off: cur, len: len - cur, Deduped: false, DOid: 0})
+			chunks = append(chunks, Chunk{off: cur, Len: len - cur, Deduped: false, DOid: 0})
 			break
 		}
 
-		chunks = append(chunks, Chunk{off: cur, len: f.Chunksize, Deduped: false, DOid: 0})
+		chunks = append(chunks, Chunk{off: cur, Len: f.Chunksize, Deduped: false, DOid: 0})
 		cur = cur + f.Chunksize
 	}
 	return

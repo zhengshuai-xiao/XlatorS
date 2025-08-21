@@ -178,7 +178,7 @@ func (l *s3Objects) ListBuckets(ctx context.Context) ([]minio.BucketInfo, error)
 
 // DeleteBucket deletes a bucket on S3
 func (l *s3Objects) DeleteBucket(ctx context.Context, bucket string, forceDelete bool) error {
-	logger.Infof("%s: enter", internal.GetCurrentFuncName())
+	logger.Tracef("%s: enter", internal.GetCurrentFuncName())
 	err := l.Client.RemoveBucket(ctx, bucket)
 	if err != nil {
 		return minio.ErrorRespToObjectError(err, bucket)
@@ -188,18 +188,28 @@ func (l *s3Objects) DeleteBucket(ctx context.Context, bucket string, forceDelete
 
 // ListObjects lists all blobs in S3 bucket filtered by prefix
 func (l *s3Objects) ListObjects(ctx context.Context, bucket string, prefix string, marker string, delimiter string, maxKeys int) (loi minio.ListObjectsInfo, e error) {
-	logger.Infof("%s: enter", internal.GetCurrentFuncName())
+	logger.Tracef("%s: enter", internal.GetCurrentFuncName())
 	result, err := l.Client.ListObjects(bucket, prefix, marker, delimiter, maxKeys)
 	if err != nil {
 		return loi, minio.ErrorRespToObjectError(err, bucket)
 	}
+	loi = minio.FromMinioClientListBucketResult(bucket, result)
 
-	return minio.FromMinioClientListBucketResult(bucket, result), nil
+	for _, obj := range loi.Objects {
+
+		logger.Tracef("loi:%s,%s", loi.NextMarker, obj.Name)
+	}
+	for _, pre := range loi.Prefixes {
+
+		logger.Tracef("loi:pre:%s", pre)
+	}
+
+	return loi, nil
 }
 
 // ListObjectsV2 lists all blobs in S3 bucket filtered by prefix
 func (l *s3Objects) ListObjectsV2(ctx context.Context, bucket, prefix, continuationToken, delimiter string, maxKeys int, fetchOwner bool, startAfter string) (loi minio.ListObjectsV2Info, e error) {
-	logger.Infof("%s: enter", internal.GetCurrentFuncName())
+	logger.Tracef("%s: enter", internal.GetCurrentFuncName())
 	result, err := l.Client.ListObjectsV2(bucket, prefix, continuationToken, fetchOwner, delimiter, maxKeys)
 	if err != nil {
 		return loi, minio.ErrorRespToObjectError(err, bucket)
@@ -210,7 +220,7 @@ func (l *s3Objects) ListObjectsV2(ctx context.Context, bucket, prefix, continuat
 
 // GetObjectNInfo - returns object info and locked object ReadCloser
 func (l *s3Objects) GetObjectNInfo(ctx context.Context, bucket, object string, rs *minio.HTTPRangeSpec, h http.Header, lockType minio.LockType, opts minio.ObjectOptions) (gr *minio.GetObjectReader, err error) {
-	logger.Infof("%s: enter", internal.GetCurrentFuncName())
+	logger.Tracef("%s: enter", internal.GetCurrentFuncName())
 	defer logger.Infof("%s: end", internal.GetCurrentFuncName())
 	var objInfo minio.ObjectInfo
 	objInfo, err = l.GetObjectInfo(ctx, bucket, object, opts)

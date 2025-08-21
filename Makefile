@@ -2,6 +2,7 @@ export GO111MODULE=on
 
 s3store := s3store
 upload_file := upload_file
+calc_fp:=calc_fp
 
 #REVISION := $(shell git rev-parse --short HEAD 2>/dev/null)
 #REVISIONDATE := $(shell git log -1 --pretty=format:'%cd' --date short 2>/dev/null)
@@ -20,6 +21,7 @@ build:
 	go version
 	go build -gcflags "all=-N -l"  -o $(s3store) main.go
 	go build -gcflags "all=-N -l"  -o $(upload_file) utils/upload_file.go
+	go build -gcflags "all=-N -l"  -o $(calc_fp) utils/calcFP.go
 #go build -ldflags="$(LDFLAGS)" -o $(s3store) main.go
 #-gcflags "all=-N -l"
 

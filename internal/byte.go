@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/gob"
+	"encoding/hex"
 	"fmt"
 )
 
@@ -35,4 +36,8 @@ func DeserializeFromString(data string, out interface{}) (err error) {
 	}
 
 	return nil
+}
+
+func StringToHex(s string) string {
+	return hex.EncodeToString([]byte(s))
 }
