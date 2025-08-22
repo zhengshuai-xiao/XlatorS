@@ -3,6 +3,7 @@ package internal
 import (
 	"encoding/gob"
 	"fmt"
+	"io"
 	"os"
 )
 
@@ -38,4 +39,25 @@ func WriteAll(file *os.File, buf []byte) (int, error) {
 	}
 
 	return total, nil
+}
+
+func WriteReadCloserToFile(rc io.ReadCloser, filePath string) (int64, error) {
+	defer func() {
+		if err := rc.Close(); err != nil {
+			return
+		}
+	}()
+
+	file, err := os.Create(filePath)
+	if err != nil {
+		return 0, fmt.Errorf("failed to create file: %w", err)
+	}
+	defer file.Close()
+
+	n, err := io.Copy(file, rc)
+	if err != nil {
+		return n, fmt.Errorf("failed to write file: %w", err)
+	}
+
+	return n, nil
 }

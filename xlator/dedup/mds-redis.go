@@ -474,6 +474,19 @@ func (m *MDSRedis) PutObjectMeta(object minio.ObjectInfo, manifestList []ChunkIn
 	return nil
 }
 
+func (m *MDSRedis) GetObjectInfo(bucket string, obj string) (minio.ObjectInfo, error) {
+	var objInfo minio.ObjectInfo
+	objInfo.Bucket = bucket
+	objInfo.Name = obj
+
+	err := m.GetObjectMeta(&objInfo)
+	if err != nil {
+		logger.Errorf("GetObjectInfo:failed to GetObjectInfo[%s] err: %s", objInfo.Name, err)
+		return objInfo, err
+	}
+	return objInfo, nil
+}
+
 func (m *MDSRedis) GetObjectMeta(object *minio.ObjectInfo) error {
 	ctx := context.Background()
 	logger.Tracef("GetObjectMeta:objectKey=%s", object.Name)
@@ -488,7 +501,7 @@ func (m *MDSRedis) GetObjectMeta(object *minio.ObjectInfo) error {
 	return json.Unmarshal([]byte(obj_info), &object)
 }
 
-func (m *MDSRedis) DelObjectMeta(bucket string, obj string) ([]int64, error) {
+func (m *MDSRedis) DelObjectMeta(bucket string, obj string) ([]uint64, error) {
 	ctx := context.Background()
 	logger.Tracef("GetObjectMeta:bucket:%s,object:%s", bucket, obj)
 	objInfo := minio.ObjectInfo{
@@ -509,9 +522,9 @@ func (m *MDSRedis) DelObjectMeta(bucket string, obj string) ([]int64, error) {
 		return nil, err
 	}
 	//TODO: get all DObj?
-	set := internal.NewInt64Set()
+	set := internal.NewUInt64Set()
 	for _, chunk := range chunks {
-		set.Add(int64(chunk.DOid))
+		set.Add(chunk.DOid)
 	}
 	dobjIDs := set.Elements()
 	//delete minifest
@@ -570,7 +583,7 @@ func (m *MDSRedis) GetIncreasedDOID() (int64, error) {
 	}
 	return id, nil
 }
-func (m *MDSRedis) GetDObjNameInMDS(id int64) string {
+func (m *MDSRedis) GetDObjNameInMDS(id uint64) string {
 
 	return fmt.Sprintf("%s%d", DOKeyWord, id)
 }
@@ -618,6 +631,32 @@ func (m *MDSRedis) WriteManifest(manifestid string, manifestList []ChunkInManife
 		}
 	}
 	return nil
+}
+
+func (m *MDSRedis) GetObjectManifest(bucket, object string) (chunks []ChunkInManifest, err error) {
+	//ctx := context.Background()
+	// Get the manifest ID for the object
+	objInfo := minio.ObjectInfo{
+		Bucket: bucket,
+		Name:   object,
+	}
+	objKey := objInfo.Name
+	err = m.GetObjectMeta(&objInfo)
+	if err != nil {
+		logger.Errorf("failed to GetObjectMeta object:%s", objKey)
+		return nil, err
+	}
+	//get manifest
+	manifestid := objInfo.UserTags
+
+	// Get the manifest chunks
+	logger.Tracef("manifestid:%s", manifestid)
+	chunks, err = m.GetManifest(manifestid)
+	if err != nil {
+		logger.Errorf("GetObjectManifest: failed to get manifest[%s] err: %s", manifestid, err)
+		return nil, err
+	}
+	return chunks, nil
 }
 
 func (m *MDSRedis) GetManifest(manifestid string) (chunks []ChunkInManifest, err error) {

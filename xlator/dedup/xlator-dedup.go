@@ -363,17 +363,51 @@ func (x *XlatorDedup) DeleteObjects(ctx context.Context, bucket string, objects 
 
 func (x *XlatorDedup) GetObject(ctx context.Context, bucket, object string, startOffset, length int64, writer io.Writer, etag string, opts minio.ObjectOptions) (err error) {
 	logger.Tracef("%s: enter", internal.GetCurrentFuncName())
-	return
+	if length < 0 && length != -1 {
+		return minio.ErrorRespToObjectError(minio.InvalidRange{}, bucket, object)
+	}
+	err = x.readObject(ctx, bucket, object, startOffset, length, writer, etag, opts)
+	if err != nil {
+		logger.Errorf("GetObject: failed to read object[%s] err: %s", object, err)
+		return minio.ErrorRespToObjectError(err, bucket, object)
+	}
+	return nil
 }
 
 func (x *XlatorDedup) GetObjectInfo(ctx context.Context, bucket, object string, opts minio.ObjectOptions) (objInfo minio.ObjectInfo, err error) {
 	logger.Tracef("%s: enter", internal.GetCurrentFuncName())
+	objInfo, err = x.Mdsclient.GetObjectInfo(bucket, object)
+	if err != nil {
+		logger.Errorf("GetObjectInfo:failed to GetObjectInfo[%s] err: %s", object, err)
+		return objInfo, err
+	}
 	return
 }
 
 func (x *XlatorDedup) GetObjectNInfo(ctx context.Context, bucket, object string, rs *minio.HTTPRangeSpec, h http.Header, lockType minio.LockType, opts minio.ObjectOptions) (gr *minio.GetObjectReader, err error) {
-	logger.Tracef("%s: enter", internal.GetCurrentFuncName())
-	return nil, minio.NotImplemented{}
+	logger.Tracef("%s: enter:bucket=%s,object=%s", internal.GetCurrentFuncName(), bucket, object)
+	var objInfo minio.ObjectInfo
+	objInfo, err = x.GetObjectInfo(ctx, bucket, object, opts)
+	if err != nil {
+		logger.Errorf("GetObjectInfo:failed to GetObjectInfo[%s] err: %s", object, err)
+		return nil, err
+	}
+
+	fn, off, length, err := minio.NewGetObjectReader(rs, objInfo, opts)
+	if err != nil {
+		return nil, minio.ErrorRespToObjectError(err, bucket, object)
+	}
+
+	pr, pw := io.Pipe()
+	go func() {
+		err := x.GetObject(ctx, bucket, object, off, length, pw, objInfo.ETag, opts)
+		pw.CloseWithError(err)
+	}()
+
+	// Setup cleanup function to cause the above go-routine to
+	// exit in case of partial read
+	pipeCloser := func() { pr.Close() }
+	return fn(pr, h, opts.CheckPrecondFn, pipeCloser)
 }
 
 // ListObjects lists all blobs in S3 bucket filtered by prefix

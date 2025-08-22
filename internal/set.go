@@ -35,35 +35,35 @@ func (s *StringSet) Elements() []string {
 	return elements
 }
 
-type Int64Set struct {
-	m map[int64]struct{}
+type UInt64Set struct {
+	m map[uint64]struct{}
 }
 
-func NewInt64Set() *Int64Set {
-	return &Int64Set{
-		m: make(map[int64]struct{}),
+func NewUInt64Set() *UInt64Set {
+	return &UInt64Set{
+		m: make(map[uint64]struct{}),
 	}
 }
 
-func (s *Int64Set) Add(item int64) {
+func (s *UInt64Set) Add(item uint64) {
 	s.m[item] = struct{}{}
 }
 
-func (s *Int64Set) Remove(item int64) {
+func (s *UInt64Set) Remove(item uint64) {
 	delete(s.m, item)
 }
 
-func (s *Int64Set) Contains(item int64) bool {
+func (s *UInt64Set) Contains(item uint64) bool {
 	_, exists := s.m[item]
 	return exists
 }
 
-func (s *Int64Set) Len() int {
+func (s *UInt64Set) Len() int {
 	return len(s.m)
 }
 
-func (s *Int64Set) Elements() []int64 {
-	elements := make([]int64, 0, len(s.m))
+func (s *UInt64Set) Elements() []uint64 {
+	elements := make([]uint64, 0, len(s.m))
 	for item := range s.m {
 		elements = append(elements, item)
 		logger.Tracef("Elements:%d", item)

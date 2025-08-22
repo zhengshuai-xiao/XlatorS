@@ -2,12 +2,14 @@ package dedup
 
 import (
 	"context"
+	"encoding/gob"
 	"fmt"
 	"io"
 	"os"
 	"sync"
 	"time"
 
+	miniogo "github.com/minio/minio-go/v7"
 	minio "github.com/minio/minio/cmd"
 	"github.com/zhengshuai-xiao/XlatorS/internal"
 	S3client "github.com/zhengshuai-xiao/XlatorS/pkg/s3client"
@@ -27,9 +29,9 @@ var buffPool = sync.Pool{
 }
 
 type fpinDObj struct {
-	fp     string
-	offset int64
-	len    int64
+	FP     [32]byte
+	Offset uint64
+	Len    uint64
 }
 
 type DObj struct {
@@ -41,6 +43,15 @@ type DObj struct {
 	fps        []fpinDObj
 }
 
+type DObjReader struct {
+	bucket     string
+	dobj_key   string
+	path       string
+	dob_offset uint64
+	filer      *os.File
+	fpmap      map[string]fpinDObj
+}
+
 func (x *XlatorDedup) truncateDObj(ctx context.Context, dobj *DObj) (err error) {
 	fps_off := dobj.dob_offset
 	if fps_off <= 8 {
@@ -48,17 +59,24 @@ func (x *XlatorDedup) truncateDObj(ctx context.Context, dobj *DObj) (err error) 
 		return nil
 	}
 	//write fps
+	seekCurrent, _ := dobj.filer.Seek(0, io.SeekCurrent)
+	logger.Tracef("xzs SeekCurrent=%d", seekCurrent)
+	encoder := gob.NewEncoder(dobj.filer)
 	for _, fp := range dobj.fps {
-		err = internal.SerializeToFile(fp, dobj.filer)
+		err = encoder.Encode(fp)
 		if err != nil {
 			return err
 		}
+		seekCurrent, _ = dobj.filer.Seek(0, io.SeekCurrent)
+		logger.Tracef("xzs SeekCurrent=%d", seekCurrent)
 	}
+
+	logger.Tracef("truncateDObj:write %d fps to %s", len(dobj.fps), dobj.dobj_key)
 	//write offset
 	b := internal.UInt64ToBytesLittleEndian(fps_off)
 	_, err = dobj.filer.WriteAt(b[:], 0)
 	if err != nil {
-		return fmt.Errorf("failed to write fps_off[%u]: %w", fps_off, err)
+		return fmt.Errorf("failed to write fps_off[%d]: %w", fps_off, err)
 	}
 	dobj.filer.Close()
 	//put obj to backend
@@ -70,14 +88,18 @@ func (x *XlatorDedup) truncateDObj(ctx context.Context, dobj *DObj) (err error) 
 
 	return nil
 }
+func (x *XlatorDedup) getDobjPathFromLocal(dobj_key string) string {
+	//read data from object
+	return filePath + dobj_key
+}
 func (x *XlatorDedup) newDObj(dobj *DObj) (err error) {
 	doid, err := x.Mdsclient.GetIncreasedDOID()
 	if err != nil {
 		logger.Errorf("failed to GetIncreasedDOID, err:%s", err)
 		return
 	}
-	dobj.dobj_key = x.Mdsclient.GetDObjNameInMDS(doid)
-	dobj.path = filePath + dobj.dobj_key
+	dobj.dobj_key = x.Mdsclient.GetDObjNameInMDS(uint64(doid))
+	dobj.path = x.getDobjPathFromLocal(dobj.dobj_key)
 	dobj.filer, err = os.OpenFile(dobj.path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
 	if err != nil {
 		return err
@@ -129,7 +151,15 @@ func (x *XlatorDedup) writeDObj(ctx context.Context, dobj *DObj, buf []byte, chu
 		chunks[i].DOid = uint64(doid)
 		//chunks[i].OffInDOid = dobj.dob_offset
 		//chunks[i].LenInDOid = chunks[i].Len
+		fp := fpinDObj{
+			Offset: dobj.dob_offset,
+			Len:    chunks[i].Len,
+		}
+		copy(fp.FP[:], chunks[i].FP[:])
+		dobj.fps = append(dobj.fps, fp)
+
 		dobj.dob_offset += uint64(chunks[i].Len)
+
 	}
 	return writenLen, err
 }
@@ -198,4 +228,154 @@ func (x *XlatorDedup) writeObj(ctx context.Context, r *minio.PutObjReader, objIn
 	logger.Infof("writeDObj: elapsed time %s", elapsed)
 
 	return manifestList, nil
+}
+
+func (x *XlatorDedup) readDataFromObject(writer io.Writer, chunk ChunkInManifest, dobjReader *DObjReader) (err error) {
+	//read data from object
+	fpinDObj := dobjReader.fpmap[string(chunk.FP[:])]
+	logger.Tracef("readDataFromObject: fpinDObj: %+v", fpinDObj)
+	_, err = dobjReader.filer.Seek(int64(fpinDObj.Offset), 0)
+	if err != nil {
+		logger.Errorf("readDataFromObject: failed to seek file err: %s", err)
+		return
+	}
+	_, err = io.CopyN(writer, dobjReader.filer, int64(fpinDObj.Len))
+	if err != nil {
+		logger.Errorf("readDataFromObject: failed to copy file err: %s", err)
+		return
+	}
+	return
+}
+func (x *XlatorDedup) parseDataObject(dobjReader *DObjReader) (err error) {
+	// parse the file
+	var fpOffsetStr [8]byte
+	_, err = dobjReader.filer.Read(fpOffsetStr[:])
+	if err != nil {
+		logger.Errorf("parseDataObject: failed to read fpOffsetStr err: %s", err)
+		return
+	}
+
+	fpOffset := internal.BytesToUInt64LittleEndian(fpOffsetStr)
+	logger.Tracef("parseDataObject: read fpOffset: %d", fpOffset)
+
+	//var buf []byte
+	//var buf bytes.Buffer
+	//buffer := make([]byte, 4096)
+	dobjReader.filer.Seek(int64(fpOffset), 0)
+	/*for {
+		n, err := dobjReader.filer.Read(buffer)
+		if n > 0 {
+			buf.Write(buffer[:n])
+		}
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		logger.Tracef("xzs 1, %d", buf.Len())
+	}*/
+
+	//buf_ := bytes.NewBufferString(string(buf[:]))
+	//gob.Register(fpinDObj{})
+
+	decoder := gob.NewDecoder(dobjReader.filer)
+	for {
+		var fpinDObj fpinDObj
+
+		if err = decoder.Decode(&fpinDObj); err != nil {
+			if err == io.EOF {
+				break
+			}
+			logger.Errorf("parseDataObject: failed to DeserializeFromString [%s] err: %s", dobjReader.path, err)
+			return err
+		}
+
+		dobjReader.fpmap[string(fpinDObj.FP[:])] = fpinDObj
+		logger.Tracef("xzs 2:fpinDObj=(%v)", fpinDObj)
+	}
+
+	return nil
+}
+
+func (x *XlatorDedup) getDataObject(bucket, object string, o minio.ObjectOptions) (dobjReader DObjReader, err error) {
+	ctx := context.Background()
+	//check if the file exist
+	//init the fpmap
+	dobjReader.fpmap = make(map[string]fpinDObj)
+	dobjReader.path = x.getDobjPathFromLocal(object)
+	_, err = os.Stat(dobjReader.path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			//download from backend
+			opts := miniogo.GetObjectOptions{}
+			opts.ServerSideEncryption = o.ServerSideEncryption
+			dobjCloseReader, _, _, err := x.Client.GetObject(ctx, bucket, object, opts)
+			if err != nil {
+				logger.Errorf("failed to get object[%s] from backend: %s", object, err)
+				return DObjReader{}, err
+			}
+			_, err = internal.WriteReadCloserToFile(dobjCloseReader, dobjReader.path)
+			if err != nil {
+				logger.Errorf("failed to write object[%s] to local disk: %s", object, err)
+				return DObjReader{}, err
+			}
+		}
+		return
+	}
+	logger.Tracef("read data object[%s] on local disk", dobjReader.path)
+	dobjReader.bucket = bucket
+	dobjReader.dobj_key = object
+	//open data object
+	dobjReader.filer, err = os.Open(dobjReader.path)
+	if err != nil {
+		logger.Errorf("getDataObject: failed to open data object[%s] err: %s", dobjReader.path, err)
+		return
+	}
+
+	// parse the file
+	err = x.parseDataObject(&dobjReader)
+	if err != nil {
+		logger.Errorf("getDataObject: failed to parse data object[%s] err: %s", dobjReader.path, err)
+		return
+	}
+
+	return dobjReader, nil
+}
+func (x *XlatorDedup) readDataObject(chunks []ChunkInManifest, startOffset, length int64, writer io.Writer, o minio.ObjectOptions) (err error) {
+	//parse chunks
+	logger.Tracef("readDataObject enter:%d", len(chunks))
+	for _, chunk := range chunks {
+		//download and read data object
+		var dobjReader DObjReader
+		dobjReader, err = x.getDataObject(BackendBucket, x.Mdsclient.GetDObjNameInMDS(chunk.DOid), o)
+		if err != nil {
+			logger.Errorf("readDataObject: failed to get data object[%d] err: %s", chunk.DOid, err)
+			return
+		}
+		//read data from object
+		err = x.readDataFromObject(writer, chunk, &dobjReader)
+		if err != nil {
+			logger.Errorf("readDataObject: failed to read data from object[%d] err: %s", chunk.DOid, err)
+			return
+		}
+	}
+	return
+}
+
+func (x *XlatorDedup) readObject(ctx context.Context, bucket, object string, startOffset, length int64, writer io.Writer, etag string, opts minio.ObjectOptions) (err error) {
+	logger.Tracef("readObject enter")
+	manifest, err := x.Mdsclient.GetObjectManifest(bucket, object)
+	if err != nil {
+		logger.Errorf("readObject: failed to get object manifest[%s] err: %s", object, err)
+		return
+	}
+	logger.Tracef("readObject manifest=%d", len(manifest))
+	err = x.readDataObject(manifest, startOffset, length, writer, opts)
+	if err != nil {
+		logger.Errorf("readObject: failed to read data object[%s] err: %s", object, err)
+		return
+	}
+	logger.Tracef("readObject end")
+	return
 }
