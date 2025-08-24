@@ -35,5 +35,6 @@ xlators
 upload_file
 calc_fp
 test
+getObject_aws
 
 test.go

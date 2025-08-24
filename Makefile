@@ -3,6 +3,7 @@ export GO111MODULE=on
 xlators := xlators
 upload_file := upload_file
 calc_fp:=calc_fp
+getObject_aws:=getObject_aws
 
 #REVISION := $(shell git rev-parse --short HEAD 2>/dev/null)
 #REVISIONDATE := $(shell git log -1 --pretty=format:'%cd' --date short 2>/dev/null)
@@ -22,6 +23,7 @@ build:
 	go build -ldflags="$(LDFLAGS)" -o $(xlators) main.go
 	go build -ldflags="$(LDFLAGS)" -o $(upload_file) utils/upload_file.go
 	go build -ldflags="$(LDFLAGS)" -o $(calc_fp) utils/calcFP.go
+	go build -ldflags="$(LDFLAGS)" -o $(getObject_aws) utils/getObject4AWS.go
 dbuild:
 	go version
 	@echo "building debug"
