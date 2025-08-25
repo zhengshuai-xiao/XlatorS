@@ -23,6 +23,7 @@ XlatorS 集群:有每个XlatorS组成，前端过来的对象都会经过XlatorS
 XlatorS包含多种Xlator，例如：
 
 * Inline Deduplication（在线重删功能），它会在主IO路径中对数据进行：切块 -> 算指纹 -> 查重 -> 引用 -> 数据写盘 -> 提交元数据 等操作最终达到数据重删的目的
+  * 详情查看doc/cn/Dedup目录
 * Data Protection（数据保护），数据保护是个很大的领域，这里主要针对数据存储安全方向：WORM、FileHash（病毒检测）等
 * Data Masking（数据脱敏），在写/读数据时进行数据脱敏，例如对敏感数据做非对称加密...
 * 数据分析、用户自定义数据加密/压缩等、集群调度
@@ -30,7 +31,6 @@ XlatorS包含多种Xlator，例如：
 用户可以根据自己的需求灵活配置，甚至定义自己的数据翻译器。
 
 MetaData Engine: 存放元数据信息，比如：当翻译前后的对象（Object）名或桶（Bucket）名不一一对应时，元数据里会存放对应的映射关系。元数据一般都是热数据，IO操作比较频繁， 所以目前使用Redis/RocketDB等...
-
 
 ## 部署
 

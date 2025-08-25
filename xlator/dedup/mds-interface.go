@@ -32,8 +32,11 @@ type MDS interface {
 	WriteManifest(manifestid string, manifestList []ChunkInManifest) error
 	GetManifest(manifestid string) (chunks []ChunkInManifest, err error)
 	GetObjectManifest(bucket, object string) (chunks []ChunkInManifest, err error)
-	DedupFPs(chunks []Chunk) error
-	DedupFPsBatch(chunks []Chunk) error
-	InsertFPs(chunks []ChunkInManifest) error
-	InsertFPsBatch(chunks []ChunkInManifest) error
+	DedupFPs(namespace string, chunks []Chunk) error
+	DedupFPsBatch(namespace string, chunks []Chunk) error
+	InsertFPs(namespace string, chunks []ChunkInManifest) error
+	InsertFPsBatch(namespace string, chunks []ChunkInManifest) error
+	AddReference(namespace string, dataObjectIDs []uint64, objectName string) error
+	RemoveReference(namespace string, dataObjectIDs []uint64, objectName string) (dereferencedDObjIDs []uint64, err error)
+	RemoveFPs(namespace string, FPs []string, DOid uint64) error
 }

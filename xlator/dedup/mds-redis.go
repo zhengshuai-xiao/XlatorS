@@ -51,11 +51,12 @@ Redis features:
 	Scan: 2.8+
 */
 const (
-	KeyExists  = 1
-	DOKeyWord  = "DataObj"
-	FPCacheKey = "FPCache"
-	BucketsKey = "Buckets"
-	ObjectFake = "ObjectFake"
+	KeyExists    = 1
+	DOKeyWord    = "DataObj"
+	FPCacheKey   = "FPCache"
+	BucketsKey   = "Buckets"
+	RefKeySuffix = "Ref"
+	ObjectFake   = "ObjectFake"
 )
 
 type MDSRedis struct {
@@ -354,15 +355,19 @@ func (m *MDSRedis) Init(format *Format, force bool) error {
 
 func (m *MDSRedis) MakeBucket(bucket string) error {
 	ctx := context.Background()
+	_, _, err := ParseNamespaceAndBucket(bucket)
+	if err != nil {
+		return err
+	}
 
 	exists, err := m.rdb.HExists(ctx, BucketsKey, bucket).Result()
 	if err != nil {
-		logger.Errorf("MakeBucket:failed to check exist for bucket:%s, err:%s", bucket, err)
+		logger.Errorf("MakeBucket:failed to check exist for bucket[%s], err:%s", bucket, err)
 		return err
 	}
 
 	if exists {
-		logger.Warnf("MakeBucket:bucket:%s already exists", bucket)
+		logger.Warnf("MakeBucket:bucket[%s] already exists", bucket)
 		return err
 	}
 
@@ -374,7 +379,7 @@ func (m *MDSRedis) MakeBucket(bucket string) error {
 	logger.Infof("MDSRedis::MakeBucket[%s]: %s", bucket, jsonData)
 	err = m.rdb.HSet(ctx, BucketsKey, bucket, jsonData).Err()
 	if err != nil {
-		logger.Errorf("MDSRedis::failed to HSet bucket[%s] to %s: %s", bucket, BucketsKey, err)
+		logger.Errorf("MDSRedis::failed to HSet bucket[%s]: %s", bucket, err)
 		return err
 	}
 	return nil
@@ -382,25 +387,30 @@ func (m *MDSRedis) MakeBucket(bucket string) error {
 
 func (m *MDSRedis) DelBucket(bucket string) error {
 	ctx := context.Background()
+
 	objCount, err := m.rdb.HLen(ctx, bucket).Result()
 	if err != nil {
 		logger.Errorf("MDSRedis::failed to HLen bucket[%s]: %s", bucket, err)
 		return err
 	}
+
 	if objCount > 0 {
 		logger.Errorf("the bucket:%s is not empty(%d objects left)", bucket, objCount)
 		return fmt.Errorf("the bucket:%s is not empty(%d objects left)", bucket, objCount)
 	}
+
 	err = m.rdb.Del(ctx, bucket).Err()
 	if err != nil {
 		logger.Errorf("MDSRedis::failed to DelBucket[%s]: %s", bucket, err)
 		return err
 	}
+
 	err = m.rdb.HDel(ctx, BucketsKey, bucket).Err()
 	if err != nil {
-		logger.Errorf("MDSRedis::failed to DelBucket[%s] in %s: %s", bucket, BucketsKey, err)
+		logger.Errorf("MDSRedis::failed to DelBucket[%s] %s", bucket, err)
 		return err
 	}
+
 	logger.Tracef("MDSRedis::successfully DelBucket[%s]", bucket)
 	return nil
 }
@@ -681,12 +691,12 @@ func (m *MDSRedis) GetManifest(manifestid string) (chunks []ChunkInManifest, err
 	return chunks, nil
 }
 
-func (m *MDSRedis) DedupFPs(chunks []Chunk) error {
+func (m *MDSRedis) DedupFPs(namespace string, chunks []Chunk) error {
 	//pipe := m.rdb.Pipeline()
 
 	for i, chunk := range chunks {
 
-		fps := m.getFingerprint(chunk.FP)
+		fps := m.getFingerprint(namespace, chunk.FP)
 		if fps != nil {
 			chunks[i].DOid = fps.DOid
 			chunks[i].Deduped = true
@@ -698,12 +708,12 @@ func (m *MDSRedis) DedupFPs(chunks []Chunk) error {
 	return nil
 }
 
-func (m *MDSRedis) InsertFPs(chunks []ChunkInManifest) error {
+func (m *MDSRedis) InsertFPs(namespace string, chunks []ChunkInManifest) error {
 	//pipe := m.rdb.Pipeline()
 
 	for _, chunk := range chunks {
 		//pipe.Set(ctx, getFPNameInMDS(chunk.FP), str, 0)
-		err := m.setFingerprint(chunk.FP, FPValInMDS{DOid: chunk.DOid})
+		err := m.setFingerprint(namespace, chunk.FP, FPValInMDS{DOid: chunk.DOid})
 		if err != nil {
 			return err
 		}
@@ -713,75 +723,157 @@ func (m *MDSRedis) InsertFPs(chunks []ChunkInManifest) error {
 	return nil
 }
 
-func (m *MDSRedis) DedupFPsBatch(chunks []Chunk) error {
+func (m *MDSRedis) DedupFPsBatch(namespace string, chunks []Chunk) error {
 	ctx := context.Background()
-	pipe := m.rdb.Pipeline()
-	var err error
+	fpCache := GetFingerprintCache(namespace)
 
-	cmder := make([]*redis.StringCmd, len(chunks))
-	for i, chunk := range chunks {
-		cmder[i] = pipe.HGet(ctx, FPCacheKey, chunk.FP)
-	}
-	_, err = pipe.Exec(ctx)
-	if err != nil {
-		if err == redis.Nil {
-			//logger.Tracef("DedupFPsBatch: FPCacheKey:%s does not exist", FPCacheKey)
-			//return nil
-		} else {
+	// Use a WATCH transaction to ensure we get a consistent view of the fingerprints.
+	// If the fingerprint cache is modified concurrently (e.g., by RemoveFPs),
+	// the transaction will fail and retry, preventing decisions based on stale data.
+	err := m.rdb.Watch(ctx, func(tx *redis.Tx) error {
+		if len(chunks) == 0 {
+			return nil
+		}
+
+		fps := make([]string, len(chunks))
+		for i := range chunks {
+			fps[i] = chunks[i].FP
+		}
+
+		// HMGet is more efficient for batch lookups.
+		vals, err := tx.HMGet(ctx, fpCache, fps...).Result()
+		if err != nil {
+			// redis.Nil is not returned by HMGet. Instead, the slice contains nil for non-existent keys.
 			return err
 		}
-	}
 
-	for i, chunk := range chunks {
-		doidStr, err := cmder[i].Result()
-		if err != nil {
-			if err != redis.Nil {
-				logger.Errorf("DedupFPsBatch: failed to get result for chunk[%d]: %s", i, err)
-			} else {
-				logger.Tracef("DedupFPsBatch: chunk[%d] does not exist", i)
+		for i := range chunks {
+			if vals[i] == nil {
+				// Fingerprint not found in cache.
+				chunks[i].Deduped = false
+				continue
 			}
 
-			continue
+			doidStr, ok := vals[i].(string)
+			if !ok || doidStr == "" {
+				// This case should ideally not happen if data is consistent.
+				logger.Warnf("DedupFPsBatch: unexpected or empty value for fp %s", internal.StringToHex(chunks[i].FP))
+				chunks[i].Deduped = false
+				continue
+			}
+
+			DOid, err := strconv.ParseUint(doidStr, 10, 64)
+			if err != nil {
+				return fmt.Errorf("failed to parse DOID '%s' for fp %s: %w", doidStr, internal.StringToHex(chunks[i].FP), err)
+			}
+			chunks[i].DOid = DOid
+			chunks[i].Deduped = true
+			logger.Tracef("DedupFPsBatch: found existing fp:%s in %s, DOid: %d", internal.StringToHex(chunks[i].FP), fpCache, DOid)
 		}
-		if doidStr == "" {
-			logger.Errorf("DedupFPsBatch: chunk[%d] does not exist", i)
-			continue
-		}
-		DOid, err := strconv.ParseUint(doidStr, 10, 64)
-		if err != nil {
-			return err
-		}
-		chunks[i].DOid = DOid
-		chunks[i].Deduped = true
-		logger.Tracef("DedupFPsBatch:found existed fp:%s", internal.StringToHex(chunk.FP))
+		return nil
+	}, fpCache)
+
+	if err != nil {
+		logger.Errorf("DedupFPsBatch: transaction failed for namespace %s: %v", namespace, err)
 	}
-	return nil
+	return err
 }
 
-func (m *MDSRedis) InsertFPsBatch(chunks []ChunkInManifest) error {
+func (m *MDSRedis) InsertFPsBatch(namespace string, chunks []ChunkInManifest) error {
 	ctx := context.Background()
-	var err error
-	pipe := m.rdb.Pipeline()
+	fpCache := GetFingerprintCache(namespace)
 
-	for _, chunk := range chunks {
-		_, err := pipe.HSet(ctx, FPCacheKey, chunk.FP, chunk.DOid).Result()
-		if err != nil {
+	// Use a WATCH transaction to prevent race conditions with concurrent deletes or inserts.
+	err := m.rdb.Watch(ctx, func(tx *redis.Tx) error {
+		if len(chunks) == 0 {
+			return nil
+		}
+		pipe := tx.TxPipeline()
+		for _, chunk := range chunks {
+			// HSetNX is used to avoid overwriting a fingerprint that might have been
+			// inserted by a concurrent process after the initial dedup check.
+			pipe.HSetNX(ctx, fpCache, chunk.FP, chunk.DOid)
+		}
+		_, err := pipe.Exec(ctx)
+		return err
+	}, fpCache)
+
+	if err != nil {
+		logger.Errorf("InsertFPsBatch: transaction failed for namespace %s: %v", namespace, err)
+	}
+	return err
+}
+
+// RemoveFPs removes a batch of fingerprints from the cache for a specific namespace.
+// It only removes a fingerprint if its associated Data Object ID matches the provided DOid.
+// This is crucial to prevent deleting a fingerprint that has been reused by a newer Data Object.
+// This operation is atomic, using a Redis WATCH transaction to effectively lock the fingerprint
+// cache for the given namespace during the operation.
+func (m *MDSRedis) RemoveFPs(namespace string, FPs []string, DOid uint64) error {
+	ctx := context.Background()
+	fpCacheKey := GetFingerprintCache(namespace)
+	doidStr := strconv.FormatUint(DOid, 10)
+
+	err := m.rdb.Watch(ctx, func(tx *redis.Tx) error {
+		if len(FPs) == 0 {
+			return nil
+		}
+
+		// Get all current DOIDs for the given FPs in one command to be efficient.
+		storedDoidVals, err := tx.HMGet(ctx, fpCacheKey, FPs...).Result()
+		if err != nil && err != redis.Nil {
 			return err
 		}
-		logger.Tracef("InsertFPsBatch: fp[%s], DOid:%d", internal.StringToHex(chunk.FP), chunk.DOid)
-	}
-	_, err = pipe.Exec(ctx)
+
+		var fpsToDelete []string
+		for i, fp := range FPs {
+			// storedDoidVals[i] will be nil if the key does not exist in the hash.
+			if storedDoidVals[i] == nil {
+				logger.Warnf("RemoveFPs: fingerprint %s not found in cache %s, skipping.", internal.StringToHex(fp), fpCacheKey)
+				continue
+			}
+
+			storedDoidStr, ok := storedDoidVals[i].(string)
+			if !ok {
+				// This should not happen with Redis string values.
+				logger.Errorf("RemoveFPs: unexpected type for fingerprint %s value in cache %s", internal.StringToHex(fp), fpCacheKey)
+				continue
+			}
+
+			// Only add the FP to the deletion list if the stored DOid matches the expected one.
+			if storedDoidStr == doidStr {
+				fpsToDelete = append(fpsToDelete, fp)
+			} else {
+				// This is a valid scenario where the fingerprint has been overwritten by a new
+				// data object. We must not delete it.
+				logger.Warnf("RemoveFPs: fingerprint %s in cache %s has a different DOID (%s) than expected (%s). Not deleting.", internal.StringToHex(fp), fpCacheKey, storedDoidStr, doidStr)
+			}
+		}
+
+		if len(fpsToDelete) > 0 {
+			// Use a transaction pipeline to delete all matching FPs at once.
+			_, err := tx.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+				pipe.HDel(ctx, fpCacheKey, fpsToDelete...)
+				return nil
+			})
+			return err
+		}
+
+		return nil
+	}, fpCacheKey)
+
 	if err != nil {
-		logger.Errorf("InsertFPsBatch: failed to Exec pipeline. err:%v", err)
-		return err
+		logger.Errorf("RemoveFPs: transaction failed for namespace %s: %v", namespace, err)
 	}
-	return nil
+
+	return err
 }
 
 // 1: found, 0 is not
-func (m *MDSRedis) getFingerprint(fp string) *FPValInMDS {
+func (m *MDSRedis) getFingerprint(namespace string, fp string) *FPValInMDS {
 	ctx := context.Background()
-	doidStr, err := m.rdb.HGet(ctx, FPCacheKey, fp).Result()
+	fpCache := GetFingerprintCache(namespace)
+	doidStr, err := m.rdb.HGet(ctx, fpCache, fp).Result()
 	if err != nil {
 		if err == redis.Nil {
 			//not existed
@@ -800,12 +892,146 @@ func (m *MDSRedis) getFingerprint(fp string) *FPValInMDS {
 	return fps
 }
 
-func (m *MDSRedis) setFingerprint(fp string, dpval FPValInMDS) error {
+func (m *MDSRedis) setFingerprint(namespace string, fp string, dpval FPValInMDS) error {
 	ctx := context.Background()
+	fpCache := GetFingerprintCache(namespace)
 	str_val, err := internal.SerializeToString(dpval)
 	if err != nil {
 		logger.Errorf("setFingerprint: failed to SerializeToString. err:%s", err)
 		return err
 	}
-	return m.rdb.HSet(ctx, FPCacheKey, fp, str_val).Err()
+	return m.rdb.HSet(ctx, fpCache, fp, str_val).Err()
+}
+
+// AddReference adds an object reference to multiple Data Objects in a batch.
+// It uses a Redis WATCH transaction to ensure atomicity.
+// For each dataObjectID, it retrieves the current reference list (a comma-separated string),
+// and appends the objectName if it does not already exist.
+// Finally, it uses a Pipeline to update all changes in a batch.
+func (m *MDSRedis) AddReference(namespace string, dataObjectIDs []uint64, objectName string) error {
+	ctx := context.Background()
+	refKey := GetRefKey(namespace)
+
+	err := m.rdb.Watch(ctx, func(tx *redis.Tx) error {
+		newValues := make(map[string]string)
+		for _, dobjID := range dataObjectIDs {
+			dobjIDStr := strconv.FormatUint(dobjID, 10)
+			val, err := tx.HGet(ctx, refKey, dobjIDStr).Result()
+			if err != nil && err != redis.Nil {
+				return err // Real error, fail transaction
+			}
+
+			var newVal string
+			if err == redis.Nil {
+				// First reference
+				newVal = objectName
+			} else {
+				objNames := strings.Split(val, ",")
+				found := false
+				for _, name := range objNames {
+					if name == objectName {
+						found = true
+						break
+					}
+				}
+				if found {
+					continue // Already exists, skip this one
+				}
+				newVal = val + "," + objectName
+			}
+			newValues[dobjIDStr] = newVal
+		}
+
+		if len(newValues) > 0 {
+			_, err := tx.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+				for id, val := range newValues {
+					pipe.HSet(ctx, refKey, id, val)
+				}
+				return nil
+			})
+			return err
+		}
+		return nil
+	}, refKey)
+
+	if err != nil {
+		logger.Errorf("AddReference: failed batch transaction for objName %s: %v", objectName, err)
+	}
+	return err
+}
+
+// RemoveReference removes an object reference from multiple Data Objects in a batch.
+// It uses a Redis WATCH transaction to ensure atomicity.
+// The function iterates through all dataObjectIDs, removing the specified objectName from each.
+// If a Data Object's reference list becomes empty after removal, its field is deleted from the hash,
+// and its ID is added to the returned list.
+//
+// The return value, dereferencedDObjIDs, is a []uint64 slice containing the IDs of all Data Objects
+// whose reference count dropped to zero during this operation. This list can be used for subsequent
+// garbage collection (GC).
+func (m *MDSRedis) RemoveReference(namespace string, dataObjectIDs []uint64, objectName string) (dereferencedDObjIDs []uint64, err error) {
+	ctx := context.Background()
+	refKey := GetRefKey(namespace)
+
+	err = m.rdb.Watch(ctx, func(tx *redis.Tx) error {
+		updates := make(map[string]interface{})
+		deletes := make([]string, 0)
+		dereferencedDObjIDs = nil // Reset for each transaction attempt
+
+		for _, dobjID := range dataObjectIDs {
+			dobjIDStr := strconv.FormatUint(dobjID, 10)
+			val, err := tx.HGet(ctx, refKey, dobjIDStr).Result()
+			if err == redis.Nil {
+				logger.Warnf("RemoveReference: data object %d not found in ref map for namespace %s", dobjID, namespace)
+				continue // Not an error, just nothing to do for this ID
+			}
+			if err != nil {
+				return err // Real error, fail transaction
+			}
+
+			objNames := strings.Split(val, ",")
+
+			found := false
+			var newObjNames []string
+			for _, name := range objNames {
+				if name != objectName {
+					newObjNames = append(newObjNames, name)
+				} else {
+					found = true
+				}
+			}
+
+			if !found {
+				logger.Warnf("RemoveReference: object name %s not found for data object %d", objectName, dobjID)
+				continue // Not an error, reference was not present for this ID
+			}
+
+			if len(newObjNames) == 0 {
+				deletes = append(deletes, dobjIDStr)
+				dereferencedDObjIDs = append(dereferencedDObjIDs, dobjID)
+			} else {
+				updates[dobjIDStr] = strings.Join(newObjNames, ",")
+			}
+		}
+
+		if len(updates) > 0 || len(deletes) > 0 {
+			_, err := tx.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+				if len(updates) > 0 {
+					pipe.HSet(ctx, refKey, updates)
+				}
+				if len(deletes) > 0 {
+					pipe.HDel(ctx, refKey, deletes...)
+				}
+				return nil
+			})
+			return err
+		}
+		return nil
+	}, refKey)
+
+	if err != nil {
+		logger.Errorf("RemoveReference: failed batch transaction for objName %s: %v", objectName, err)
+		return nil, err
+	}
+	return dereferencedDObjIDs, nil
 }

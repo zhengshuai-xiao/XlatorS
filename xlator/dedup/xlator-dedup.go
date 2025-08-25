@@ -34,9 +34,10 @@ import (
 )
 
 const (
-	sep           = "/"
-	XlatorName    = "Dedup"
-	BackendBucket = "xzstest"
+	sep                 = "/"
+	XlatorName          = "Dedup"
+	DefaultNS           = "globalns"
+	BackendBucketPrefix = "dedup."
 )
 
 type XlatorDedup struct {
@@ -86,30 +87,32 @@ func NewXlatorDedup(gConf *internal.Config) (*XlatorDedup, error) {
 		Mdsclient: redismeta,
 	}
 
-	err = xlatorDedup.CreateBackendBucket()
+	/*err = xlatorDedup.CreateBackendBucket()
 	if err != nil {
 		logger.Errorf("failed to create backend bucket: %v", err)
 		return xlatorDedup, err
-	}
+	}*/
 	return xlatorDedup, nil
 }
 
-func (x *XlatorDedup) CreateBackendBucket() (err error) {
-	ctx := context.Background()
-	var ok bool
-	if ok, err = x.Client.BucketExists(ctx, BackendBucket); err != nil {
-		return minio.ErrorRespToObjectError(err, BackendBucket)
-	}
-	if !ok {
-		err = x.Client.MakeBucket(ctx, BackendBucket, miniogo.MakeBucketOptions{Region: "us-east-1", ObjectLocking: false})
-		if err != nil {
+/*
+	func (x *XlatorDedup) CreateBackendBucket() (err error) {
+		ctx := context.Background()
+		var ok bool
+		if ok, err = x.Client.BucketExists(ctx, BackendBucket); err != nil {
 			return minio.ErrorRespToObjectError(err, BackendBucket)
 		}
-		logger.Infof("Created backend bucket: %s", BackendBucket)
-	}
+		if !ok {
+			err = x.Client.MakeBucket(ctx, BackendBucket, miniogo.MakeBucketOptions{Region: "us-east-1", ObjectLocking: false})
+			if err != nil {
+				return minio.ErrorRespToObjectError(err, BackendBucket)
+			}
+			logger.Infof("Created backend bucket: %s", BackendBucket)
+		}
 
-	return nil
-}
+		return nil
+	}
+*/
 func (x *XlatorDedup) Shutdown(ctx context.Context) error {
 	return nil
 }
@@ -165,8 +168,17 @@ func (x *XlatorDedup) MakeBucketWithLocation(ctx context.Context, bucket string,
 	if opts.LockEnabled || opts.VersioningEnabled {
 		return minio.NotImplemented{}
 	}
-	//bucket := x.Mdsclient.ConvertBucketName(bucket_orig)
-	logger.Infof("new bucket name: %s", bucket)
+
+	ns, bucket, err := ParseNamespaceAndBucket(bucket)
+	if err != nil {
+		return err
+	}
+	if ns == DefaultNS {
+		logger.Infof("no specified namespace, so used default namespace:%s", ns)
+	}
+
+	logger.Infof("new bucket name: %s in namespace:%s", bucket, ns)
+	//DefaultNS
 	// Verify if bucket name is valid.
 	// We are using a separate helper function here to validate bucket
 	// names instead of IsValidBucketName() because there is a possibility
@@ -174,21 +186,30 @@ func (x *XlatorDedup) MakeBucketWithLocation(ctx context.Context, bucket string,
 	// in us-east-1 and we might severely restrict them by not allowing
 	// access to these buckets.
 	// Ref - http://docs.aws.amazon.com/AmazonS3/latest/dev/BucketRestrictions.html
+
 	if s3utils.CheckValidBucketName(bucket) != nil {
+		logger.Error("invalid bucket name")
 		return minio.BucketNameInvalid{Bucket: bucket}
 	}
-	err := x.Mdsclient.MakeBucket(bucket)
+
+	//Create backend bucket with location(Namespace)
+	backendBucket := GetBackendBucketName(ns)
+	ok, err := x.Client.BucketExists(ctx, backendBucket)
 	if err != nil {
-		return minio.ErrorRespToObjectError(err, bucket)
+		return minio.ErrorRespToObjectError(err, backendBucket)
+	}
+	if !ok {
+		//the bucket is not existed
+		logger.Infof("new backend bucket name: %s in location:%s", backendBucket, opts.Location)
+		err = x.Client.MakeBucket(ctx, backendBucket, miniogo.MakeBucketOptions{Region: opts.Location})
+		if err != nil {
+			return minio.ErrorRespToObjectError(err, backendBucket)
+		}
 	}
 
-	/*err = x.Client.MakeBucket(ctx, bucket, miniogo.MakeBucketOptions{Region: opts.Location})
-	if err != nil {
-		return minio.ErrorRespToObjectError(err, bucket)
-	}*/
-
-	return err
+	return x.Mdsclient.MakeBucket(bucket)
 }
+
 func (x *XlatorDedup) GetBucketInfo(ctx context.Context, bucket string) (bi minio.BucketInfo, err error) {
 	logger.Tracef("%s: enter", internal.GetCurrentFuncName())
 	//bucket = x.Mdsclient.ConvertBucketName(bucket)
@@ -263,6 +284,12 @@ func (x *XlatorDedup) PutObject(ctx context.Context, bucket string, object strin
 		logger.Errorf("this is a invalid bucket name [%s]", bucket)
 		return
 	}
+	ns, _, err := ParseNamespaceAndBucket(bucket)
+	if err != nil {
+		logger.Errorf("failed to parse Namespace from %s", bucket)
+		return objInfo, err
+	}
+
 	manifestID, err := x.Mdsclient.GetIncreasedManifestID()
 	if err != nil {
 		logger.Errorf("failed to get increased manifest ID: %v", err)
@@ -295,10 +322,10 @@ func (x *XlatorDedup) PutObject(ctx context.Context, bucket string, object strin
 		UserDefined: minio.CleanMetadata(opts.UserDefined),
 		IsLatest:    true,
 	}
-	//objInfo.UserDefined["BackendBucket"] = BackendBucket
+
 	logger.Info("PutObject 2")
 	var manifestList []ChunkInManifest
-	manifestList, err = x.writeObj(ctx, r, &objInfo)
+	manifestList, err = x.writeObj(ctx, ns, r, &objInfo)
 	if err != nil {
 		logger.Errorf("failed to write data to object %s: %v", object, err)
 		return objInfo, err
@@ -314,7 +341,7 @@ func (x *XlatorDedup) PutObject(ctx context.Context, bucket string, object strin
 	}
 	elapsed2 := time.Since(start2)
 	logger.Infof("PutObject 4, manifestList=%d, elapsed2=%f", len(manifestList), elapsed2.Seconds())
-	err = x.Mdsclient.InsertFPsBatch(manifestList)
+	err = x.Mdsclient.InsertFPsBatch(ns, manifestList)
 	if err != nil {
 		logger.Errorf("failed to insert fingerprints for object %s: %v", object, err)
 		return objInfo, err

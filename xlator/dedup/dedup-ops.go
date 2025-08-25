@@ -164,7 +164,7 @@ func (x *XlatorDedup) writeDObj(ctx context.Context, dobj *DObj, buf []byte, chu
 	return writenLen, err
 }
 
-func (x *XlatorDedup) writeObj(ctx context.Context, r *minio.PutObjReader, objInfo *minio.ObjectInfo) (manifestList []ChunkInManifest, err error) {
+func (x *XlatorDedup) writeObj(ctx context.Context, ns string, r *minio.PutObjReader, objInfo *minio.ObjectInfo) (manifestList []ChunkInManifest, err error) {
 	var totalSize int64 = 0
 	var totalWriteSize int64 = 0
 	start := time.Now()
@@ -172,7 +172,7 @@ func (x *XlatorDedup) writeObj(ctx context.Context, r *minio.PutObjReader, objIn
 	cdc := FixedCDC{Chunksize: 128 * 1024}
 	var buf = buffPool.Get().(*[]byte)
 	defer buffPool.Put(buf)
-	dobj := &DObj{bucket: BackendBucket, dobj_key: "", path: "", dob_offset: 0, filer: nil}
+	dobj := &DObj{bucket: GetBackendBucketName(ns), dobj_key: "", path: "", dob_offset: 0, filer: nil}
 	for {
 		var n int
 		n, err = io.ReadFull(r, *buf)
@@ -192,7 +192,7 @@ func (x *XlatorDedup) writeObj(ctx context.Context, r *minio.PutObjReader, objIn
 		//calc fp
 		CalcFPs((*buf)[:n], chunks)
 		//search fp
-		err = x.Mdsclient.DedupFPsBatch(chunks)
+		err = x.Mdsclient.DedupFPsBatch(ns, chunks)
 		if err != nil {
 			logger.Errorf("writeObj: failed to deduplicate chunks: %s", err)
 			return nil, err
@@ -342,13 +342,13 @@ func (x *XlatorDedup) getDataObject(bucket, object string, o minio.ObjectOptions
 
 	return dobjReader, nil
 }
-func (x *XlatorDedup) readDataObject(chunks []ChunkInManifest, startOffset, length int64, writer io.Writer, o minio.ObjectOptions) (err error) {
+func (x *XlatorDedup) readDataObject(backendBucket string, chunks []ChunkInManifest, startOffset, length int64, writer io.Writer, o minio.ObjectOptions) (err error) {
 	//parse chunks
 	logger.Tracef("readDataObject enter:%d", len(chunks))
 	for _, chunk := range chunks {
 		//download and read data object
 		var dobjReader DObjReader
-		dobjReader, err = x.getDataObject(BackendBucket, x.Mdsclient.GetDObjNameInMDS(chunk.DOid), o)
+		dobjReader, err = x.getDataObject(backendBucket, x.Mdsclient.GetDObjNameInMDS(chunk.DOid), o)
 		if err != nil {
 			logger.Errorf("readDataObject: failed to get data object[%d] err: %s", chunk.DOid, err)
 			return
@@ -365,13 +365,15 @@ func (x *XlatorDedup) readDataObject(chunks []ChunkInManifest, startOffset, leng
 
 func (x *XlatorDedup) readObject(ctx context.Context, bucket, object string, startOffset, length int64, writer io.Writer, etag string, opts minio.ObjectOptions) (err error) {
 	logger.Tracef("readObject enter")
+	backendBucket := GetBackendBucketNameViaBucketName(bucket)
+
 	manifest, err := x.Mdsclient.GetObjectManifest(bucket, object)
 	if err != nil {
 		logger.Errorf("readObject: failed to get object manifest[%s] err: %s", object, err)
 		return
 	}
 	logger.Tracef("readObject manifest=%d", len(manifest))
-	err = x.readDataObject(manifest, startOffset, length, writer, opts)
+	err = x.readDataObject(backendBucket, manifest, startOffset, length, writer, opts)
 	if err != nil {
 		logger.Errorf("readObject: failed to read data object[%s] err: %s", object, err)
 		return

@@ -110,36 +110,46 @@ func (f *Format) update(old *Format, force bool) error {
 	return nil
 }
 
+const (
+	Global = "Global"
+)
+
 type BucketInfo struct {
-	Name             string    `json:"Name,omitempty"`
-	UUID             string    `json:"UUID,omitempty"`
-	Created          time.Time `json:"Created,omitempty"`
-	BlockSize        int       `json:"BlockSize,omitempty"`
-	ChunkMethod      string    `json:"ChunkMethod,omitempty"`
-	Compression      string    `json:"Compression,omitempty"`
-	Shards           int       `json:"Shards,omitempty"`
-	HashPrefix       bool      `json:"HashPrefix,omitempty"`
-	Capacity         uint64    `json:"Capacity,omitempty"`
-	EncryptKey       string    `json:",omitempty"`
-	EncryptAlgo      string    `json:",omitempty"`
-	KeyEncrypted     bool      `json:",omitempty"`
-	UploadLimit      int64     `json:",omitempty"`
-	DownloadLimit    int64     `json:",omitempty"`
-	TrashDays        int       `json:",omitempty"`
-	MetaVersion      int       `json:",omitempty"`
-	MinClientVersion string    `json:",omitempty"`
-	MaxClientVersion string    `json:",omitempty"`
-	EnableACL        bool      `json:",omitempty"`
+	Name                    string    `json:"Name,omitempty"`
+	UUID                    string    `json:"UUID,omitempty"`
+	Created                 time.Time `json:"Created,omitempty"`
+	Location                string    `json:"Location,omitempty"` //Namespace/backend bucket name
+	BackendBucketNamePrefix string    `json:"BackendBucketNamePrefix,omitempty"`
+	BlockSizeMin            uint32    `json:"BlockSizeMin,omitempty"`
+	BlockSizeMax            uint32    `json:"BlockSizeMax,omitempty"`
+	ChunkMethod             string    `json:"ChunkMethod,omitempty"`
+	Compression             string    `json:"Compression,omitempty"`
+	Shards                  int       `json:"Shards,omitempty"`
+	HashPrefix              bool      `json:"HashPrefix,omitempty"`
+	Capacity                uint64    `json:"Capacity,omitempty"`
+	EncryptKey              string    `json:",omitempty"`
+	EncryptAlgo             string    `json:",omitempty"`
+	KeyEncrypted            bool      `json:",omitempty"`
+	UploadLimit             int64     `json:",omitempty"`
+	DownloadLimit           int64     `json:",omitempty"`
+	TrashDays               int       `json:",omitempty"`
+	MetaVersion             int       `json:",omitempty"`
+	MinClientVersion        string    `json:",omitempty"`
+	MaxClientVersion        string    `json:",omitempty"`
+	EnableACL               bool      `json:",omitempty"`
 }
 
 func newBucketInfo(name string) *BucketInfo {
 	bucketinfo := BucketInfo{
-		Name:        name,
-		UUID:        uuid.New().String(),
-		Created:     time.Now(),
-		BlockSize:   4 * 1024 * 1024,
-		ChunkMethod: "fixed:128k",
-		Shards:      1,
+		Name:                    name,
+		UUID:                    uuid.New().String(),
+		Created:                 time.Now(),
+		Location:                Global,
+		BackendBucketNamePrefix: BackendBucketPrefix,
+		BlockSizeMin:            128 * 1024,
+		BlockSizeMax:            128 * 1024,
+		ChunkMethod:             "fixed",
+		Shards:                  1,
 	}
 	return &bucketinfo
 }
