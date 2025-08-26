@@ -36,5 +36,6 @@ upload_file
 calc_fp
 test
 getObject_aws
+gc_trigger
 
 test.go

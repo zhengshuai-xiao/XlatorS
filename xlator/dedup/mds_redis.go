@@ -61,7 +61,7 @@ const (
 
 type MDSRedis struct {
 	//*baseMeta
-	rdb          redis.UniversalClient
+	Rdb          redis.UniversalClient
 	prefix       string //DB name
 	bucketPrefix string //BUK
 	ObjectPrefic string //OBJ
@@ -236,7 +236,7 @@ func NewRedisMeta(driver, addr string, conf *Config) (MDS, error) {
 	}
 	prefix := fmt.Sprintf("DB%d", opt.DB)
 	m := MDSRedis{
-		rdb:          rdb,
+		Rdb:          rdb,
 		prefix:       prefix,
 		bucketPrefix: prefix + "BUK",
 		ObjectPrefic: prefix + "OBJ",
@@ -247,7 +247,7 @@ func NewRedisMeta(driver, addr string, conf *Config) (MDS, error) {
 	return &m, nil
 }
 func (m *MDSRedis) checkServerConfig() {
-	rawInfo, err := m.rdb.Info(context.Background()).Result()
+	rawInfo, err := m.Rdb.Info(context.Background()).Result()
 	if err != nil {
 		logger.Warnf("parse info: %s", err)
 		return
@@ -258,9 +258,9 @@ func (m *MDSRedis) checkServerConfig() {
 	}
 	if rInfo.storageProvider == "" && rInfo.maxMemoryPolicy != "" && rInfo.maxMemoryPolicy != "noeviction" {
 		logger.Warnf("maxmemory_policy is %q,  we will try to reconfigure it to 'noeviction'.", rInfo.maxMemoryPolicy)
-		if _, err := m.rdb.ConfigSet(context.Background(), "maxmemory-policy", "noeviction").Result(); err != nil {
+		if _, err := m.Rdb.ConfigSet(context.Background(), "maxmemory-policy", "noeviction").Result(); err != nil {
 			logger.Errorf("try to reconfigure maxmemory-policy to 'noeviction' failed: %s", err)
-		} else if result, err := m.rdb.ConfigGet(context.Background(), "maxmemory-policy").Result(); err != nil {
+		} else if result, err := m.Rdb.ConfigGet(context.Background(), "maxmemory-policy").Result(); err != nil {
 			logger.Warnf("get config maxmemory-policy failed: %s", err)
 		} else if len(result) == 1 && result["maxmemory-policy"] != "noeviction" {
 			logger.Warnf("reconfigured maxmemory-policy to 'noeviction', but it's still %s", result["maxmemory-policy"])
@@ -269,7 +269,7 @@ func (m *MDSRedis) checkServerConfig() {
 		}
 	}
 	start := time.Now()
-	_, err = m.rdb.Ping(context.Background()).Result()
+	_, err = m.Rdb.Ping(context.Background()).Result()
 	if err != nil {
 		logger.Errorf("Ping redis: %s", err.Error())
 		return
@@ -288,7 +288,7 @@ func extractBetweenCommas(s string) (string, error) {
 }
 
 func (m *MDSRedis) Shutdown() error {
-	return m.rdb.Close()
+	return m.Rdb.Close()
 }
 
 func (m *MDSRedis) Name() string {
@@ -301,7 +301,7 @@ func (m *MDSRedis) setting() string {
 
 func (m *MDSRedis) Init(format *Format, force bool) error {
 	ctx := context.Background()
-	body, err := m.rdb.Get(ctx, m.setting()).Bytes()
+	body, err := m.Rdb.Get(ctx, m.setting()).Bytes()
 	if err != nil && err != redis.Nil {
 		return err
 	}
@@ -345,7 +345,7 @@ func (m *MDSRedis) Init(format *Format, force bool) error {
 		if err != nil {
 			return err
 		}
-		if err = m.rdb.Set(ctx, m.setting(), jsonDataIndent, 0).Err(); err != nil {
+		if err = m.Rdb.Set(ctx, m.setting(), jsonDataIndent, 0).Err(); err != nil {
 			return err
 		}
 	}
@@ -362,7 +362,7 @@ func (m *MDSRedis) MakeBucket(bucket string) error {
 	// Check if the bucket already exists globally (in any namespace)
 	// This prevents creating a bucket with the same name in different namespaces,
 	// which might lead to confusion or conflicts in a global context.
-	exists, err := m.rdb.HExists(ctx, BucketsKey, bucket).Result()
+	exists, err := m.Rdb.HExists(ctx, BucketsKey, bucket).Result()
 	if err != nil {
 		logger.Errorf("MakeBucket: failed to check global existence for bucket[%s], err:%s", bucket, err)
 		return err
@@ -383,7 +383,7 @@ func (m *MDSRedis) MakeBucket(bucket string) error {
 	logger.Infof("MDSRedis::MakeBucket[%s] %s", bucket, jsonData)
 
 	// Store the bucket metadata, associating it with the actual bucket name (not the full name with namespace)
-	err = m.rdb.HSet(ctx, BucketsKey, bucket, jsonData).Err()
+	err = m.Rdb.HSet(ctx, BucketsKey, bucket, jsonData).Err()
 	if err != nil {
 		logger.Errorf("MDSRedis::failed to HSet bucket[%s]: %s", bucket, err)
 		return err
@@ -394,7 +394,7 @@ func (m *MDSRedis) MakeBucket(bucket string) error {
 func (m *MDSRedis) DelBucket(bucket string) error {
 	ctx := context.Background()
 
-	objCount, err := m.rdb.HLen(ctx, bucket).Result()
+	objCount, err := m.Rdb.HLen(ctx, bucket).Result()
 	if err != nil {
 		logger.Errorf("MDSRedis::failed to HLen bucket[%s]: %s", bucket, err)
 		return err
@@ -405,13 +405,13 @@ func (m *MDSRedis) DelBucket(bucket string) error {
 		return fmt.Errorf("the bucket:%s is not empty(%d objects left)", bucket, objCount)
 	}
 
-	err = m.rdb.Del(ctx, bucket).Err()
+	err = m.Rdb.Del(ctx, bucket).Err()
 	if err != nil {
 		logger.Errorf("MDSRedis::failed to DelBucket[%s]: %s", bucket, err)
 		return err
 	}
 
-	err = m.rdb.HDel(ctx, BucketsKey, bucket).Err()
+	err = m.Rdb.HDel(ctx, BucketsKey, bucket).Err()
 	if err != nil {
 		logger.Errorf("MDSRedis::failed to DelBucket[%s] %s", bucket, err)
 		return err
@@ -423,7 +423,7 @@ func (m *MDSRedis) DelBucket(bucket string) error {
 
 func (m *MDSRedis) ListBuckets() ([]minio.BucketInfo, error) {
 	ctx := context.Background()
-	buckets, err := m.rdb.HGetAll(ctx, BucketsKey).Result()
+	buckets, err := m.Rdb.HGetAll(ctx, BucketsKey).Result()
 	if err != nil {
 		logger.Errorf("MDSRedis::failed to ListBuckets: %s", err)
 		return nil, err
@@ -447,7 +447,7 @@ func (m *MDSRedis) ListBuckets() ([]minio.BucketInfo, error) {
 
 func (m *MDSRedis) ListObjects(bucket string, prefix string) (result []minio.ObjectInfo, err error) {
 	ctx := context.Background()
-	objects, err := m.rdb.HGetAll(ctx, bucket).Result()
+	objects, err := m.Rdb.HGetAll(ctx, bucket).Result()
 	if err != nil {
 		logger.Errorf("failed to HGetAll bucket: %s, err: %s", bucket, err)
 		return nil, err
@@ -499,7 +499,7 @@ func (m *MDSRedis) PutObjectMeta(object minio.ObjectInfo, manifestList []ChunkIn
 		m.RemoveReference(ns, doidSet.Elements(), object.Name)
 		return err
 	}
-	err = m.rdb.HSet(ctx, object.Bucket, object.Name, jsondata).Err()
+	err = m.Rdb.HSet(ctx, object.Bucket, object.Name, jsondata).Err()
 	if err != nil {
 		logger.Errorf("MDSRedis::failed to HSet object[%s] into bucket[%s] : %s", object.Name, object.Bucket, err)
 		return err
@@ -525,7 +525,7 @@ func (m *MDSRedis) GetObjectMeta(object *minio.ObjectInfo) error {
 	ctx := context.Background()
 	logger.Tracef("GetObjectMeta:objectKey=%s", object.Name)
 
-	obj_info, err := m.rdb.HGet(ctx, object.Bucket, object.Name).Result()
+	obj_info, err := m.Rdb.HGet(ctx, object.Bucket, object.Name).Result()
 	if err != nil {
 		return err
 	}
@@ -592,7 +592,7 @@ func (m *MDSRedis) DelObjectMeta(bucket string, obj string) (dereferencedDObjIDs
 	//delete relevent fp in FPCache
 
 	// Step 6: Delete the object's metadata key from the bucket's hash.
-	err = m.rdb.HDel(ctx, bucket, objKey).Err()
+	err = m.Rdb.HDel(ctx, bucket, objKey).Err()
 	if err != nil {
 		logger.Errorf("failed to delete object[%s] meta, err:%s", objKey, err)
 		return dereferencedDObjIDs, err
@@ -623,7 +623,7 @@ func (m *MDSRedis) DelObjectMeta(bucket string, obj string) (dereferencedDObjIDs
 func (m *MDSRedis) BucketExist(bucket string) (bool, error) {
 	ctx := context.Background()
 
-	exists, err := m.rdb.HExists(ctx, BucketsKey, bucket).Result()
+	exists, err := m.Rdb.HExists(ctx, BucketsKey, bucket).Result()
 	if err != nil {
 		logger.Errorf("MakeBucket:failed to check exist for bucket:%s, err:%s", bucket, err)
 		return false, err
@@ -635,7 +635,7 @@ func (m *MDSRedis) BucketExist(bucket string) (bool, error) {
 func (m *MDSRedis) GetIncreasedDOID() (int64, error) {
 	ctx := context.Background()
 
-	id, err := m.rdb.Incr(ctx, doidkey).Result()
+	id, err := m.Rdb.Incr(ctx, doidkey).Result()
 	if err != nil {
 		return 0, err
 	}
@@ -667,7 +667,7 @@ func (m *MDSRedis) GetDOIDFromDObjName(objName string) (num int64, err error) {
 func (m *MDSRedis) GetIncreasedManifestID() (string, error) {
 	ctx := context.Background()
 
-	id, err := m.rdb.Incr(ctx, manifestKey).Result()
+	id, err := m.Rdb.Incr(ctx, manifestKey).Result()
 	if err != nil {
 		return "", err
 	}
@@ -682,7 +682,7 @@ func (m *MDSRedis) WriteManifest(manifestid string, manifestList []ChunkInManife
 			logger.Errorf("MDSRedis::failed to SerializeToString chunk[%v] : %s", chunk, err)
 			return err
 		}
-		_, err = m.rdb.RPush(ctx, manifestid, str).Result()
+		_, err = m.Rdb.RPush(ctx, manifestid, str).Result()
 		if err != nil {
 			logger.Errorf("MDSRedis::failed to RPush chunk[%v] into manifest[%s] : %s", chunk, manifestid, err)
 			return err
@@ -703,7 +703,7 @@ func (m *MDSRedis) writeManifestReturnDOidList(manifestid string, manifestList [
 			logger.Errorf("MDSRedis::failed to SerializeToString chunk[%v] : %s", chunk, err)
 			return nil, err
 		}
-		_, err = m.rdb.RPush(ctx, manifestid, str).Result()
+		_, err = m.Rdb.RPush(ctx, manifestid, str).Result()
 		if err != nil {
 			logger.Errorf("MDSRedis::failed to RPush chunk[%v] into manifest[%s] : %s", chunk, manifestid, err)
 			return nil, err
@@ -714,7 +714,7 @@ func (m *MDSRedis) writeManifestReturnDOidList(manifestid string, manifestList [
 
 func (m *MDSRedis) delManifest(ctx context.Context, mfid string) (err error) {
 	//delete minifest
-	err = m.rdb.Del(ctx, mfid).Err()
+	err = m.Rdb.Del(ctx, mfid).Err()
 	if err != nil {
 		return fmt.Errorf("failed to delete manifest:%s, err:%s", mfid, err)
 	}
@@ -750,7 +750,7 @@ func (m *MDSRedis) GetObjectManifest(bucket, object string) (chunks []ChunkInMan
 func (m *MDSRedis) GetManifest(manifestid string) (chunks []ChunkInManifest, err error) {
 	ctx := context.Background()
 	// Get the list of chunk IDs from the manifest
-	fps, err := m.rdb.LRange(ctx, manifestid, 0, -1).Result()
+	fps, err := m.Rdb.LRange(ctx, manifestid, 0, -1).Result()
 	if err != nil {
 		logger.Errorf("MDSRedis::failed to LRange manifest[%s] : %s", manifestid, err)
 		return nil, err
@@ -773,7 +773,7 @@ func (m *MDSRedis) getManifestAndDOIDSet(manifestid string) (chunks []ChunkInMan
 	ctx := context.Background()
 	doidSet = internal.NewUInt64Set()
 	// Get the list of chunk IDs from the manifest
-	fps, err := m.rdb.LRange(ctx, manifestid, 0, -1).Result()
+	fps, err := m.Rdb.LRange(ctx, manifestid, 0, -1).Result()
 	if err != nil {
 		logger.Errorf("MDSRedis::failed to LRange manifest[%s] : %s", manifestid, err)
 		return nil, nil, err
@@ -832,7 +832,7 @@ func (m *MDSRedis) DedupFPsBatch(namespace string, chunks []Chunk) error {
 	// Use a WATCH transaction to ensure we get a consistent view of the fingerprints.
 	// If the fingerprint cache is modified concurrently (e.g., by RemoveFPs),
 	// the transaction will fail and retry, preventing decisions based on stale data.
-	err := m.rdb.Watch(ctx, func(tx *redis.Tx) error {
+	err := m.Rdb.Watch(ctx, func(tx *redis.Tx) error {
 		if len(chunks) == 0 {
 			return nil
 		}
@@ -895,7 +895,7 @@ func (m *MDSRedis) InsertFPsBatch(namespace string, chunks []ChunkInManifest) er
 	fpCache := GetFingerprintCache(namespace)
 
 	// Use a WATCH transaction to prevent race conditions with concurrent deletes or inserts.
-	err := m.rdb.Watch(ctx, func(tx *redis.Tx) error {
+	err := m.Rdb.Watch(ctx, func(tx *redis.Tx) error {
 		if len(chunks) == 0 {
 			return nil
 		}
@@ -929,7 +929,7 @@ func (m *MDSRedis) RemoveFPs(namespace string, FPs []string, DOid uint64) error 
 	fpCacheKey := GetFingerprintCache(namespace)
 	doidStr := strconv.FormatUint(DOid, 10)
 
-	err := m.rdb.Watch(ctx, func(tx *redis.Tx) error {
+	err := m.Rdb.Watch(ctx, func(tx *redis.Tx) error {
 		if len(FPs) == 0 {
 			return nil
 		}
@@ -987,7 +987,7 @@ func (m *MDSRedis) RemoveFPs(namespace string, FPs []string, DOid uint64) error 
 func (m *MDSRedis) getFingerprint(namespace string, fp string) *FPValInMDS {
 	ctx := context.Background()
 	fpCache := GetFingerprintCache(namespace)
-	doidStr, err := m.rdb.HGet(ctx, fpCache, fp).Result()
+	doidStr, err := m.Rdb.HGet(ctx, fpCache, fp).Result()
 	if err != nil {
 		if err == redis.Nil {
 			//not existed
@@ -1014,7 +1014,7 @@ func (m *MDSRedis) setFingerprint(namespace string, fp string, dpval FPValInMDS)
 		logger.Errorf("setFingerprint: failed to SerializeToString. err:%s", err)
 		return err
 	}
-	return m.rdb.HSet(ctx, fpCache, fp, str_val).Err()
+	return m.Rdb.HSet(ctx, fpCache, fp, str_val).Err()
 }
 
 // AddReference adds an object reference to multiple Data Objects in a batch.
@@ -1026,7 +1026,7 @@ func (m *MDSRedis) AddReference(namespace string, dataObjectIDs []uint64, object
 	ctx := context.Background()
 	refKey := GetRefKey(namespace)
 
-	err := m.rdb.Watch(ctx, func(tx *redis.Tx) error {
+	err := m.Rdb.Watch(ctx, func(tx *redis.Tx) error {
 		newValues := make(map[string]string)
 		for _, dobjID := range dataObjectIDs {
 			dobjIDStr := strconv.FormatUint(dobjID, 10)
@@ -1087,7 +1087,7 @@ func (m *MDSRedis) RemoveReference(namespace string, dataObjectIDs []uint64, obj
 	ctx := context.Background()
 	refKey := GetRefKey(namespace)
 
-	err = m.rdb.Watch(ctx, func(tx *redis.Tx) error {
+	err = m.Rdb.Watch(ctx, func(tx *redis.Tx) error {
 		updates := make(map[string]interface{})
 		deletes := make([]string, 0)
 		dereferencedDObjIDs = nil // Reset for each transaction attempt
@@ -1162,7 +1162,7 @@ func (m *MDSRedis) AddDeletedDOIDs(namespace string, doids []uint64) error {
 	ctx := context.Background()
 	key := GetDeletedDOIDKey(namespace)
 
-	err := m.rdb.Watch(ctx, func(tx *redis.Tx) error {
+	err := m.Rdb.Watch(ctx, func(tx *redis.Tx) error {
 		// Convert []uint64 to []interface{} for SAdd
 		members := make([]interface{}, len(doids))
 		for i, doid := range doids {
@@ -1187,7 +1187,7 @@ func (m *MDSRedis) AddDeletedDOIDs(namespace string, doids []uint64) error {
 // GetAllNamespaces retrieves a list of all unique namespaces by inspecting all bucket names.
 func (m *MDSRedis) GetAllNamespaces() ([]string, error) {
 	ctx := context.Background()
-	buckets, err := m.rdb.HKeys(ctx, BucketsKey).Result()
+	buckets, err := m.Rdb.HKeys(ctx, BucketsKey).Result()
 	if err != nil {
 		if err == redis.Nil {
 			return nil, nil // No buckets yet
@@ -1221,7 +1221,7 @@ func (m *MDSRedis) IsDOIDDeleted(namespace string, doid uint64) (bool, error) {
 	key := GetDeletedDOIDKey(namespace)
 	doidStr := strconv.FormatUint(doid, 10)
 
-	isMember, err := m.rdb.SIsMember(ctx, key, doidStr).Result()
+	isMember, err := m.Rdb.SIsMember(ctx, key, doidStr).Result()
 	if err != nil {
 		logger.Errorf("IsDOIDDeleted: failed to check SISMEMBER for DOID %d in set %s: %v", doid, key, err)
 		return false, err
@@ -1238,7 +1238,7 @@ func (m *MDSRedis) GetRandomDeletedDOIDs(namespace string, count int64) ([]uint6
 	ctx := context.Background()
 	key := GetDeletedDOIDKey(namespace)
 
-	doidStrs, err := m.rdb.SRandMemberN(ctx, key, count).Result()
+	doidStrs, err := m.Rdb.SRandMemberN(ctx, key, count).Result()
 	if err != nil {
 		if err == redis.Nil {
 			return nil, nil // Set is empty
@@ -1279,7 +1279,7 @@ func (m *MDSRedis) RemoveSpecificDeletedDOIDs(namespace string, doids []uint64) 
 		members[i] = doid
 	}
 
-	err := m.rdb.SRem(ctx, key, members...).Err()
+	err := m.Rdb.SRem(ctx, key, members...).Err()
 	if err != nil {
 		logger.Errorf("RemoveSpecificDeletedDOIDs: failed to remove DOIDs from set %s: %v", key, err)
 		return err
