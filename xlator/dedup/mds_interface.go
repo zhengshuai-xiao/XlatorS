@@ -39,4 +39,9 @@ type MDS interface {
 	AddReference(namespace string, dataObjectIDs []uint64, objectName string) error
 	RemoveReference(namespace string, dataObjectIDs []uint64, objectName string) (dereferencedDObjIDs []uint64, err error)
 	RemoveFPs(namespace string, FPs []string, DOid uint64) error
+	AddDeletedDOIDs(namespace string, doids []uint64) error
+	GetRandomDeletedDOIDs(namespace string, count int64) ([]uint64, error)
+	RemoveSpecificDeletedDOIDs(namespace string, doids []uint64) error
+	GetAllNamespaces() ([]string, error)
+	IsDOIDDeleted(namespace string, doid uint64) (bool, error)
 }

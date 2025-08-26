@@ -48,3 +48,7 @@ func GetFingerprintCache(namespace string) string {
 func GetRefKey(namespace string) string {
 	return namespace + "." + RefKeySuffix
 }
+
+func GetDeletedDOIDKey(namespace string) string {
+	return namespace + "." + DeletedDOIDKey
+}

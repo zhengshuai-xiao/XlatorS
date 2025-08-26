@@ -51,12 +51,12 @@ Redis features:
 	Scan: 2.8+
 */
 const (
-	KeyExists    = 1
-	DOKeyWord    = "DataObj"
-	FPCacheKey   = "FPCache"
-	BucketsKey   = "Buckets"
-	RefKeySuffix = "Ref"
-	ObjectFake   = "ObjectFake"
+	KeyExists      = 1
+	DOKeyWord      = "DataObj"
+	FPCacheKey     = "FPCache"
+	BucketsKey     = "Buckets"
+	RefKeySuffix   = "Ref"
+	DeletedDOIDKey = "deletedDOID"
 )
 
 type MDSRedis struct {
@@ -353,30 +353,36 @@ func (m *MDSRedis) Init(format *Format, force bool) error {
 	return nil
 }
 
+// MakeBucket creates a new bucket entry in the metadata store.
+// It takes the actual bucket name and its associated namespace.
+// It ensures that the bucket name is unique across all namespaces before creation.
 func (m *MDSRedis) MakeBucket(bucket string) error {
 	ctx := context.Background()
-	_, _, err := ParseNamespaceAndBucket(bucket)
-	if err != nil {
-		return err
-	}
 
+	// Check if the bucket already exists globally (in any namespace)
+	// This prevents creating a bucket with the same name in different namespaces,
+	// which might lead to confusion or conflicts in a global context.
 	exists, err := m.rdb.HExists(ctx, BucketsKey, bucket).Result()
 	if err != nil {
-		logger.Errorf("MakeBucket:failed to check exist for bucket[%s], err:%s", bucket, err)
+		logger.Errorf("MakeBucket: failed to check global existence for bucket[%s], err:%s", bucket, err)
 		return err
 	}
-
 	if exists {
-		logger.Warnf("MakeBucket:bucket[%s] already exists", bucket)
-		return err
+		logger.Warnf("MakeBucket: bucket[%s] already exists globally.", bucket)
+		return minio.BucketAlreadyOwnedByYou{Bucket: bucket}
 	}
 
-	bucketinfo := newBucketInfo(bucket)
+	// Create new bucket info using the helper from types.go
+	bucketinfo := newBucketInfo(bucket) // newBucketInfo is now in types.go
+	//bucketinfo.Location = namespace     // Store the namespace as the bucket's location
 	jsonData, err := json.Marshal(bucketinfo)
 	if err != nil {
 		return err
 	}
-	logger.Infof("MDSRedis::MakeBucket[%s]: %s", bucket, jsonData)
+
+	logger.Infof("MDSRedis::MakeBucket[%s] %s", bucket, jsonData)
+
+	// Store the bucket metadata, associating it with the actual bucket name (not the full name with namespace)
 	err = m.rdb.HSet(ctx, BucketsKey, bucket, jsonData).Err()
 	if err != nil {
 		logger.Errorf("MDSRedis::failed to HSet bucket[%s]: %s", bucket, err)
@@ -464,15 +470,33 @@ func (m *MDSRedis) ListObjects(bucket string, prefix string) (result []minio.Obj
 
 func (m *MDSRedis) PutObjectMeta(object minio.ObjectInfo, manifestList []ChunkInManifest) error {
 	ctx := context.Background()
+	ns, _, err := ParseNamespaceAndBucket(object.Bucket)
+	if err != nil {
+		logger.Errorf("failed to parse namespace and bucket: %s", err)
+		return err
+	}
 	//write manifest
 	logger.Tracef("MDSRedis::PutObjectMeta: writing manifest for object[%s], manifestname:%s, len:%d", object.Name, object.UserTags, len(manifestList))
-	err := m.WriteManifest(object.UserTags, manifestList)
+	doidSet, err := m.writeManifestReturnDOidList(object.UserTags, manifestList)
 	if err != nil {
+		//cleanup the manifest, ignore if it is failed
+		m.delManifest(ctx, object.UserTags)
+		return err
+	}
+	//write reference
+	err = m.AddReference(ns, doidSet.Elements(), object.Name)
+	if err != nil {
+		//cleanup the manifest, ignore if it is failed
+		m.delManifest(ctx, object.UserTags)
 		return err
 	}
 	//write object
 	jsondata, err := json.Marshal(object)
 	if err != nil {
+		//cleanup the manifest, ignore if it is failed
+		m.delManifest(ctx, object.UserTags)
+		//cleanup the reference
+		m.RemoveReference(ns, doidSet.Elements(), object.Name)
 		return err
 	}
 	err = m.rdb.HSet(ctx, object.Bucket, object.Name, jsondata).Err()
@@ -500,6 +524,7 @@ func (m *MDSRedis) GetObjectInfo(bucket string, obj string) (minio.ObjectInfo, e
 func (m *MDSRedis) GetObjectMeta(object *minio.ObjectInfo) error {
 	ctx := context.Background()
 	logger.Tracef("GetObjectMeta:objectKey=%s", object.Name)
+
 	obj_info, err := m.rdb.HGet(ctx, object.Bucket, object.Name).Result()
 	if err != nil {
 		return err
@@ -511,45 +536,68 @@ func (m *MDSRedis) GetObjectMeta(object *minio.ObjectInfo) error {
 	return json.Unmarshal([]byte(obj_info), &object)
 }
 
-func (m *MDSRedis) DelObjectMeta(bucket string, obj string) ([]uint64, error) {
+// DelObjectMeta deletes an object's metadata and all associated references from the metadata store.
+// This is a multi-step process:
+// 1. Fetches the object's metadata to retrieve its manifest ID (stored in UserTags).
+// 2. Reads the manifest to get the list of all Data Object IDs (DOIDs) that make up this object.
+// 3. Deletes the manifest itself.
+// 4. Removes the object's reference from each of the associated DOIDs.
+// 5. If a DOID's reference count drops to zero after this removal, its ID is collected.
+// 6. Deletes the primary object metadata entry from the bucket's hash.
+// It returns a slice of DOIDs that have become dereferenced (ref count is zero) and are now eligible for garbage collection.
+func (m *MDSRedis) DelObjectMeta(bucket string, obj string) (dereferencedDObjIDs []uint64, err error) {
 	ctx := context.Background()
 	logger.Tracef("GetObjectMeta:bucket:%s,object:%s", bucket, obj)
 	objInfo := minio.ObjectInfo{
 		Bucket: bucket,
 		Name:   obj,
 	}
+
 	objKey := objInfo.Name
-	err := m.GetObjectMeta(&objInfo)
+	// Step 1: Retrieve the object's metadata to find its manifest ID.
+	err = m.GetObjectMeta(&objInfo)
 	if err != nil {
 		logger.Errorf("failed to GetObjectMeta object:%s", objKey)
 		return nil, err
 	}
-	//get manifest
+	// The manifest ID is stored in the UserTags field.
 	mfid := objInfo.UserTags
-	chunks, err := m.GetManifest(mfid)
+	// Step 2: Get the list of DOIDs from the manifest.
+	_, doidSet, err := m.getManifestAndDOIDSet(mfid)
 	if err != nil {
 		logger.Errorf("failed to GetManifest[%s], err:%s", mfid, err)
 		return nil, err
 	}
-	//TODO: get all DObj?
-	set := internal.NewUInt64Set()
-	for _, chunk := range chunks {
-		set.Add(chunk.DOid)
-	}
-	dobjIDs := set.Elements()
-	//delete minifest
-	err = m.rdb.Del(ctx, mfid).Err()
+
+	dobjIDs := doidSet.Elements()
+	// Step 3: Delete the manifest list from Redis.
+	err = m.delManifest(ctx, mfid)
 	if err != nil {
 		logger.Errorf("failed to delete manifest:%s, err:%s", mfid, err)
+		// The state is now inconsistent. Return the found DOIDs with the error.
 		return dobjIDs, err
 	}
-	//delete objKey
+	// Step 4 & 5: Remove the object's reference from all associated DOIDs and get the list of dereferenced ones.
+	ns, _, err := ParseNamespaceAndBucket(bucket)
+	if err != nil {
+		logger.Errorf("failed to parse namespace and bucket: %s for object:%s", err, objInfo.Name)
+		return nil, err
+	}
+	//dereferencedDObjIDs means the DOID in this list is no one to referenced, can be deleted from backend storage
+	dereferencedDObjIDs, err = m.RemoveReference(ns, dobjIDs, objKey)
+	if err != nil {
+		logger.Errorf("failed to RemoveReference for object:%s, err:%s", objKey, err)
+		return nil, err
+	}
+	//delete relevent fp in FPCache
+
+	// Step 6: Delete the object's metadata key from the bucket's hash.
 	err = m.rdb.HDel(ctx, bucket, objKey).Err()
 	if err != nil {
 		logger.Errorf("failed to delete object[%s] meta, err:%s", objKey, err)
-		return dobjIDs, err
+		return dereferencedDObjIDs, err
 	}
-	return dobjIDs, nil
+	return dereferencedDObjIDs, nil
 }
 
 /*
@@ -643,6 +691,36 @@ func (m *MDSRedis) WriteManifest(manifestid string, manifestList []ChunkInManife
 	return nil
 }
 
+func (m *MDSRedis) writeManifestReturnDOidList(manifestid string, manifestList []ChunkInManifest) (doidSet *internal.UInt64Set, err error) {
+	ctx := context.Background()
+	doidSet = internal.NewUInt64Set()
+	for _, chunk := range manifestList {
+
+		doidSet.Add(chunk.DOid)
+
+		str, err := internal.SerializeToString(chunk)
+		if err != nil {
+			logger.Errorf("MDSRedis::failed to SerializeToString chunk[%v] : %s", chunk, err)
+			return nil, err
+		}
+		_, err = m.rdb.RPush(ctx, manifestid, str).Result()
+		if err != nil {
+			logger.Errorf("MDSRedis::failed to RPush chunk[%v] into manifest[%s] : %s", chunk, manifestid, err)
+			return nil, err
+		}
+	}
+	return doidSet, nil
+}
+
+func (m *MDSRedis) delManifest(ctx context.Context, mfid string) (err error) {
+	//delete minifest
+	err = m.rdb.Del(ctx, mfid).Err()
+	if err != nil {
+		return fmt.Errorf("failed to delete manifest:%s, err:%s", mfid, err)
+	}
+	return nil
+}
+
 func (m *MDSRedis) GetObjectManifest(bucket, object string) (chunks []ChunkInManifest, err error) {
 	//ctx := context.Background()
 	// Get the manifest ID for the object
@@ -691,6 +769,30 @@ func (m *MDSRedis) GetManifest(manifestid string) (chunks []ChunkInManifest, err
 	return chunks, nil
 }
 
+func (m *MDSRedis) getManifestAndDOIDSet(manifestid string) (chunks []ChunkInManifest, doidSet *internal.UInt64Set, err error) {
+	ctx := context.Background()
+	doidSet = internal.NewUInt64Set()
+	// Get the list of chunk IDs from the manifest
+	fps, err := m.rdb.LRange(ctx, manifestid, 0, -1).Result()
+	if err != nil {
+		logger.Errorf("MDSRedis::failed to LRange manifest[%s] : %s", manifestid, err)
+		return nil, nil, err
+	}
+
+	// Retrieve each chunk's metadata
+	for _, fp := range fps {
+
+		var chunk ChunkInManifest
+		if err := internal.DeserializeFromString(fp, &chunk); err != nil {
+			logger.Errorf("MDSRedis::failed to DeserializeFromString chunk[%v] : %s", chunk, err)
+			return nil, nil, err
+		}
+		chunks = append(chunks, chunk)
+		doidSet.Add(chunk.DOid)
+	}
+	return chunks, doidSet, nil
+}
+
 func (m *MDSRedis) DedupFPs(namespace string, chunks []Chunk) error {
 	//pipe := m.rdb.Pipeline()
 
@@ -726,7 +828,7 @@ func (m *MDSRedis) InsertFPs(namespace string, chunks []ChunkInManifest) error {
 func (m *MDSRedis) DedupFPsBatch(namespace string, chunks []Chunk) error {
 	ctx := context.Background()
 	fpCache := GetFingerprintCache(namespace)
-
+	deleteDOIDKey := GetDeletedDOIDKey(namespace)
 	// Use a WATCH transaction to ensure we get a consistent view of the fingerprints.
 	// If the fingerprint cache is modified concurrently (e.g., by RemoveFPs),
 	// the transaction will fail and retry, preventing decisions based on stale data.
@@ -766,12 +868,21 @@ func (m *MDSRedis) DedupFPsBatch(namespace string, chunks []Chunk) error {
 			if err != nil {
 				return fmt.Errorf("failed to parse DOID '%s' for fp %s: %w", doidStr, internal.StringToHex(chunks[i].FP), err)
 			}
+			exist, err := m.IsDOIDDeleted(namespace, DOid)
+			if err != nil {
+				return err
+			}
+			if exist {
+				logger.Tracef("the fp[%s]'s Data object[id:%d] is in deleted list, so skip it", internal.StringToHex(chunks[i].FP), DOid)
+				chunks[i].Deduped = false
+				continue
+			}
 			chunks[i].DOid = DOid
 			chunks[i].Deduped = true
 			logger.Tracef("DedupFPsBatch: found existing fp:%s in %s, DOid: %d", internal.StringToHex(chunks[i].FP), fpCache, DOid)
 		}
 		return nil
-	}, fpCache)
+	}, fpCache, deleteDOIDKey)
 
 	if err != nil {
 		logger.Errorf("DedupFPsBatch: transaction failed for namespace %s: %v", namespace, err)
@@ -869,7 +980,6 @@ func (m *MDSRedis) RemoveFPs(namespace string, FPs []string, DOid uint64) error 
 	return err
 }
 
-// 1: found, 0 is not
 func (m *MDSRedis) getFingerprint(namespace string, fp string) *FPValInMDS {
 	ctx := context.Background()
 	fpCache := GetFingerprintCache(namespace)
@@ -1034,4 +1144,143 @@ func (m *MDSRedis) RemoveReference(namespace string, dataObjectIDs []uint64, obj
 		return nil, err
 	}
 	return dereferencedDObjIDs, nil
+}
+
+// AddDeletedDOIDs adds a list of Data Object IDs to the set of deleted DOIDs for a given namespace.
+// This set is used by a background garbage collection process.
+// The operation is performed within a transaction to ensure atomicity against concurrent operations
+// that might be reading this set (e.g., DedupFPsBatch).
+func (m *MDSRedis) AddDeletedDOIDs(namespace string, doids []uint64) error {
+	if len(doids) == 0 {
+		return nil
+	}
+
+	ctx := context.Background()
+	key := GetDeletedDOIDKey(namespace)
+
+	err := m.rdb.Watch(ctx, func(tx *redis.Tx) error {
+		// Convert []uint64 to []interface{} for SAdd
+		members := make([]interface{}, len(doids))
+		for i, doid := range doids {
+			members[i] = doid
+		}
+
+		pipe := tx.TxPipeline()
+		pipe.SAdd(ctx, key, members...)
+		_, err := pipe.Exec(ctx)
+		return err
+	}, key)
+
+	if err != nil {
+		logger.Errorf("AddDeletedDOIDs: transaction failed to add DOIDs to set %s: %v", key, err)
+		return err
+	}
+	logger.Tracef("AddDeletedDOIDs: added %d DOIDs to set %s", len(doids), key)
+
+	return nil
+}
+
+// GetAllNamespaces retrieves a list of all unique namespaces by inspecting all bucket names.
+func (m *MDSRedis) GetAllNamespaces() ([]string, error) {
+	ctx := context.Background()
+	buckets, err := m.rdb.HKeys(ctx, BucketsKey).Result()
+	if err != nil {
+		if err == redis.Nil {
+			return nil, nil // No buckets yet
+		}
+		logger.Errorf("GetAllNamespaces: failed to get bucket keys: %v", err)
+		return nil, err
+	}
+
+	nsSet := make(map[string]struct{})
+	for _, bucketName := range buckets {
+		ns, _, err := ParseNamespaceAndBucket(bucketName)
+		if err != nil {
+			logger.Warnf("GetAllNamespaces: could not parse namespace from bucket '%s', skipping: %v", bucketName, err)
+			continue
+		}
+		nsSet[ns] = struct{}{}
+	}
+
+	namespaces := make([]string, 0, len(nsSet))
+	for ns := range nsSet {
+		namespaces = append(namespaces, ns)
+	}
+
+	return namespaces, nil
+}
+
+// IsDOIDDeleted checks if a specific DOID is present in the deleted DOID set for a given namespace.
+// It returns true if the DOID is marked for deletion, false otherwise.
+func (m *MDSRedis) IsDOIDDeleted(namespace string, doid uint64) (bool, error) {
+	ctx := context.Background()
+	key := GetDeletedDOIDKey(namespace)
+	doidStr := strconv.FormatUint(doid, 10)
+
+	isMember, err := m.rdb.SIsMember(ctx, key, doidStr).Result()
+	if err != nil {
+		logger.Errorf("IsDOIDDeleted: failed to check SISMEMBER for DOID %d in set %s: %v", doid, key, err)
+		return false, err
+	}
+
+	return isMember, nil
+}
+
+// GetRandomDeletedDOIDs retrieves a specified number of random DOIDs from the deleted set without removing them.
+func (m *MDSRedis) GetRandomDeletedDOIDs(namespace string, count int64) ([]uint64, error) {
+	if count <= 0 {
+		return nil, nil
+	}
+	ctx := context.Background()
+	key := GetDeletedDOIDKey(namespace)
+
+	doidStrs, err := m.rdb.SRandMemberN(ctx, key, count).Result()
+	if err != nil {
+		if err == redis.Nil {
+			return nil, nil // Set is empty
+		}
+		logger.Errorf("GetRandomDeletedDOIDs: failed to SRANDMEMBER from %s: %v", key, err)
+		return nil, err
+	}
+
+	if len(doidStrs) == 0 {
+		return nil, nil
+	}
+
+	doids := make([]uint64, 0, len(doidStrs))
+	for _, s := range doidStrs {
+		doid, err := strconv.ParseUint(s, 10, 64)
+		if err != nil {
+			logger.Warnf("GetRandomDeletedDOIDs: failed to parse DOID string '%s', skipping: %v", s, err)
+			continue
+		}
+		doids = append(doids, doid)
+	}
+
+	return doids, nil
+}
+
+// RemoveSpecificDeletedDOIDs removes a list of specific DOIDs from the deleted set.
+func (m *MDSRedis) RemoveSpecificDeletedDOIDs(namespace string, doids []uint64) error {
+	if len(doids) == 0 {
+		return nil
+	}
+
+	ctx := context.Background()
+	key := GetDeletedDOIDKey(namespace)
+
+	// Convert []uint64 to []interface{} for SRem
+	members := make([]interface{}, len(doids))
+	for i, doid := range doids {
+		members[i] = doid
+	}
+
+	err := m.rdb.SRem(ctx, key, members...).Err()
+	if err != nil {
+		logger.Errorf("RemoveSpecificDeletedDOIDs: failed to remove DOIDs from set %s: %v", key, err)
+		return err
+	}
+	logger.Tracef("RemoveSpecificDeletedDOIDs: removed %d DOIDs from set %s", len(doids), key)
+
+	return nil
 }
