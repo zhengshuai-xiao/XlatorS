@@ -902,8 +902,12 @@ func (m *MDSRedis) InsertFPsBatch(namespace string, chunks []ChunkInManifest) er
 		pipe := tx.TxPipeline()
 		for _, chunk := range chunks {
 			// HSetNX is used to avoid overwriting a fingerprint that might have been
-			// inserted by a concurrent process after the initial dedup check.
-			pipe.HSetNX(ctx, fpCache, chunk.FP, chunk.DOid)
+			// inserted by a concurrent process.
+			// Using HSet will overwrite any existing value,
+			// which can lead to race conditions and data inconsistency.
+			//But here we should use HSet
+			pipe.HSet(ctx, fpCache, chunk.FP, strconv.FormatUint(chunk.DOid, 10))
+			logger.Tracef("InsertFPsBatch: fp[%s], DOid:%d", internal.StringToHex(chunk.FP), chunk.DOid)
 		}
 		_, err := pipe.Exec(ctx)
 		return err
