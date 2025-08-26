@@ -25,7 +25,6 @@ import (
 	"time"
 
 	miniogo "github.com/minio/minio-go/v7"
-	"github.com/minio/minio-go/v7/pkg/s3utils"
 	"github.com/zhengshuai-xiao/XlatorS/internal"
 
 	minio "github.com/minio/minio/cmd"
@@ -181,27 +180,16 @@ func (x *XlatorDedup) MakeBucketWithLocation(ctx context.Context, bucket string,
 		return minio.NotImplemented{}
 	}
 
-	ns, bucket, err := ParseNamespaceAndBucket(bucket)
-	if err != nil {
+	// Validate bucket name format before proceeding.
+	// This enforces 'namespace.bucket' format with length constraints.
+	if err := ValidateBucketNameFormat(bucket); err != nil {
+		logger.Errorf("invalid bucket name format for %s: %v", bucket, err)
 		return err
 	}
-	if ns == DefaultNS {
-		logger.Infof("no specified namespace, so used default namespace:%s", ns)
-	}
 
-	logger.Infof("new bucket name: %s in namespace:%s", bucket, ns)
-	//DefaultNS
-	// Verify if bucket name is valid.
-	// We are using a separate helper function here to validate bucket
-	// names instead of IsValidBucketName() because there is a possibility
-	// that certains users might have buckets which are non-DNS compliant
-	// in us-east-1 and we might severely restrict them by not allowing
-	// access to these buckets.
-	// Ref - http://docs.aws.amazon.com/AmazonS3/latest/dev/BucketRestrictions.html
-
-	if s3utils.CheckValidBucketName(bucket) != nil {
-		logger.Error("invalid bucket name")
-		return minio.BucketNameInvalid{Bucket: bucket}
+	ns, _, err := ParseNamespaceAndBucket(bucket)
+	if err != nil {
+		return err
 	}
 
 	//Create backend bucket with location(Namespace)
@@ -225,12 +213,16 @@ func (x *XlatorDedup) MakeBucketWithLocation(ctx context.Context, bucket string,
 func (x *XlatorDedup) GetBucketInfo(ctx context.Context, bucket string) (bi minio.BucketInfo, err error) {
 	logger.Tracef("%s: enter", internal.GetCurrentFuncName())
 	//bucket = x.Mdsclient.ConvertBucketName(bucket)
-	err = x.isValidBucketName(bucket)
+	if err = ValidateBucketNameFormat(bucket); err != nil {
+		return bi, err
+	}
+	exist, err := x.Mdsclient.BucketExist(bucket)
 	if err != nil {
-		logger.Errorf("bucket %s does not exist, err:%s", bucket, err)
+		return bi, minio.ErrorRespToObjectError(err, bucket)
+	}
+	if !exist {
 		return bi, minio.BucketNotFound{Bucket: bucket}
 	}
-
 	buckets, err := x.Mdsclient.ListBuckets()
 	//buckets, err := x.Client.ListBuckets(ctx)
 	if err != nil {
@@ -275,25 +267,19 @@ func (x *XlatorDedup) ListBuckets(ctx context.Context) ([]minio.BucketInfo, erro
 	return b, err
 }
 
-func (x *XlatorDedup) isValidBucketName(bucket string) error {
-	logger.Tracef("%s: enter", internal.GetCurrentFuncName())
-	if s3utils.CheckValidBucketNameStrict(bucket) != nil {
-		return minio.BucketNameInvalid{Bucket: bucket}
-	}
-	exist, err := x.Mdsclient.BucketExist(bucket)
-	if !exist || err != nil {
-		return minio.BucketNotFound{Bucket: bucket}
-	}
-
-	return nil
-}
-
 func (x *XlatorDedup) PutObject(ctx context.Context, bucket string, object string, r *minio.PutObjReader, opts minio.ObjectOptions) (objInfo minio.ObjectInfo, err error) {
 	logger.Infof("%s: enter+++++", internal.GetCurrentFuncName())
 	start1 := time.Now()
-	err = x.isValidBucketName(bucket)
+	if err = ValidateBucketNameFormat(bucket); err != nil {
+		logger.Errorf("invalid bucket name format for %s: %v", bucket, err)
+		return
+	}
+	exist, err := x.Mdsclient.BucketExist(bucket)
 	if err != nil {
-		logger.Errorf("this is a invalid bucket name [%s]", bucket)
+		return objInfo, minio.ErrorRespToObjectError(err, bucket)
+	}
+	if !exist {
+		err = minio.BucketNotFound{Bucket: bucket}
 		return
 	}
 	ns, _, err := ParseNamespaceAndBucket(bucket)

@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/url"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -74,167 +72,22 @@ type MDSRedis struct {
 //var _ engine = (*MDSRedis)(nil)
 
 // newRedisMeta return a meta store using Redis.
-// newRedisMeta("redis", "127.0.0.1:7001,127.0.0.1:7002,127.0.0.1:7003/2")
 func NewRedisMeta(driver, addr string, conf *Config) (MDS, error) {
-	uri := driver + "://" + addr
-	u, err := url.Parse(uri)
-	if err != nil {
-		return nil, fmt.Errorf("url parse %s: %s", uri, err)
+	if driver != "redis" {
+		return nil, fmt.Errorf("unsupported meta driver: %s", driver)
 	}
 
-	hosts := u.Host
-	opt, err := redis.ParseURL(u.String())
+	rdb, err := newUniversalRedisClient(addr, conf)
 	if err != nil {
-		return nil, fmt.Errorf("redis parse %s: %s", uri, err)
+		return nil, err
 	}
 
-	if opt.TLSConfig != nil {
-		//TODO:TLS
-		/*
-			opt.TLSConfig.ServerName = tlsServerName // use the host of each connection as ServerName
-			opt.TLSConfig.InsecureSkipVerify = skipVerify != ""
-			if certFile != "" {
-				cert, err := tls.LoadX509KeyPair(certFile, keyFile)
-				if err != nil {
-					return nil, fmt.Errorf("get certificate error certFile:%s keyFile:%s error:%s", certFile, keyFile, err)
-				}
-				opt.TLSConfig.Certificates = []tls.Certificate{cert}
-			}
-			if caCertFile != "" {
-				caCert, err := os.ReadFile(caCertFile)
-				if err != nil {
-					return nil, fmt.Errorf("read ca cert file error path:%s error:%s", caCertFile, err)
-				}
-				caCertPool := x509.NewCertPool()
-				caCertPool.AppendCertsFromPEM(caCert)
-				opt.TLSConfig.RootCAs = caCertPool
-			}*/
-	}
-	if opt.Password == "" {
-		opt.Password = os.Getenv("REDIS_PASSWORD")
-	}
-	if opt.Password == "" {
-		opt.Password = os.Getenv("META_PASSWORD")
-	}
-	opt.MaxRetries = conf.Retries
-	if opt.MaxRetries == 0 {
-		opt.MaxRetries = -1 // Redis use -1 to disable retries
-	}
-	var rdb redis.UniversalClient
-	/*
-		//opt.MinRetryBackoff = minRetryBackoff
-		//opt.MaxRetryBackoff = maxRetryBackoff
-		//opt.ReadTimeout = readTimeout
-		//opt.WriteTimeout = writeTimeout
-		var rdb redis.UniversalClient
-		var prefix string
-		if strings.Contains(hosts, ",") && strings.Index(hosts, ",") < strings.Index(hosts, ":") {
-			var fopt redis.FailoverOptions
-			ps := strings.Split(hosts, ",")
-			fopt.MasterName = ps[0]
-			fopt.SentinelAddrs = ps[1:]
-			_, port, _ := net.SplitHostPort(fopt.SentinelAddrs[len(fopt.SentinelAddrs)-1])
-			if port == "" {
-				port = "26379"
-			}
-			for i, addr := range fopt.SentinelAddrs {
-				h, p, e := net.SplitHostPort(addr)
-				if e != nil {
-					fopt.SentinelAddrs[i] = net.JoinHostPort(addr, port)
-				} else if p == "" {
-					fopt.SentinelAddrs[i] = net.JoinHostPort(h, port)
-				}
-			}
-			fopt.SentinelPassword = os.Getenv("SENTINEL_PASSWORD")
-			fopt.DB = opt.DB
-			fopt.Username = opt.Username
-			fopt.Password = opt.Password
-			fopt.TLSConfig = opt.TLSConfig
-			fopt.MaxRetries = opt.MaxRetries
-			fopt.MinRetryBackoff = opt.MinRetryBackoff
-			fopt.MaxRetryBackoff = opt.MaxRetryBackoff
-			fopt.DialTimeout = opt.DialTimeout
-			fopt.ReadTimeout = opt.ReadTimeout
-			fopt.WriteTimeout = opt.WriteTimeout
-			fopt.PoolFIFO = opt.PoolFIFO               // default: false
-			fopt.PoolSize = opt.PoolSize               // default: GOMAXPROCS * 10
-			fopt.PoolTimeout = opt.PoolTimeout         // default: ReadTimeout + 1 second.
-			fopt.MinIdleConns = opt.MinIdleConns       // disable by default
-			fopt.MaxIdleConns = opt.MaxIdleConns       // disable by default
-			fopt.MaxActiveConns = opt.MaxActiveConns   // default: 0, no limit
-			fopt.ConnMaxIdleTime = opt.ConnMaxIdleTime // default: 30 minutes
-			fopt.ConnMaxLifetime = opt.ConnMaxLifetime // disable by default
-			if conf.ReadOnly {
-				// NOTE: RouteByLatency and RouteRandomly are not supported since they require cluster client
-				fopt.ReplicaOnly = routeRead == "replica"
-			}
-			rdb = redis.NewFailoverClient(&fopt)
-		} else {
-			if !strings.Contains(hosts, ",") {
-				c := redis.NewClient(opt)
-				info, err := c.ClusterInfo(Background()).Result()
-				if err != nil && strings.Contains(err.Error(), "cluster mode") || err == nil && strings.Contains(info, "cluster_state:") {
-					logger.Infof("redis %s is in cluster mode", hosts)
-				} else {
-					rdb = c
-				}
-			}
-			if rdb == nil {
-				var copt redis.ClusterOptions
-				copt.Addrs = strings.Split(hosts, ",")
-				copt.MaxRedirects = 1
-				copt.Username = opt.Username
-				copt.Password = opt.Password
-				copt.TLSConfig = opt.TLSConfig
-				copt.MaxRetries = opt.MaxRetries
-				copt.MinRetryBackoff = opt.MinRetryBackoff
-				copt.MaxRetryBackoff = opt.MaxRetryBackoff
-				copt.DialTimeout = opt.DialTimeout
-				copt.ReadTimeout = opt.ReadTimeout
-				copt.WriteTimeout = opt.WriteTimeout
-				copt.PoolFIFO = opt.PoolFIFO               // default: false
-				copt.PoolSize = opt.PoolSize               // default: GOMAXPROCS * 10
-				copt.PoolTimeout = opt.PoolTimeout         // default: ReadTimeout + 1 second.
-				copt.MinIdleConns = opt.MinIdleConns       // disable by default
-				copt.MaxIdleConns = opt.MaxIdleConns       // disable by default
-				copt.MaxActiveConns = opt.MaxActiveConns   // default: 0, no limit
-				copt.ConnMaxIdleTime = opt.ConnMaxIdleTime // default: 30 minutes
-				copt.ConnMaxLifetime = opt.ConnMaxLifetime // disable by default
-				if conf.ReadOnly {
-					switch routeRead {
-					case "random":
-						copt.RouteRandomly = true
-					case "latency":
-						copt.RouteByLatency = true
-					case "replica":
-						copt.ReadOnly = true
-					default:
-						// route to primary
-					}
-				}
-				rdb = redis.NewClusterClient(&copt)
-				prefix = fmt.Sprintf("{%d}", opt.DB)
-			}
-		}*/
-	if strings.Contains(hosts, ",") && strings.Index(hosts, ",") < strings.Index(hosts, ":") {
-		logger.Infof("redis %s is in sentinel mode, it is not implemented, so will use the first host", hosts)
-		hosts, err = extractBetweenCommas(hosts)
-	}
-	if !strings.Contains(hosts, ",") {
-		logger.Infof("redis host[%s] is in single service mode", hosts)
-		c := redis.NewClient(opt)
-		info, err := c.ClusterInfo(context.Background()).Result()
-		if err != nil && strings.Contains(err.Error(), "cluster mode") || err == nil && strings.Contains(info, "cluster_state:") {
-			logger.Infof("redis %s is in cluster mode", hosts)
-		} else {
-			logger.Infof("redis %s is in single mode", hosts)
-		}
-		rdb = c
-	} else {
-		logger.Fatalf("failed to find any valid host in redis hosts")
-		return nil, errors.New("failed to find any valid host in redis hosts")
-	}
-	prefix := fmt.Sprintf("DB%d", opt.DB)
+	// The DB number is already handled by the client, but we need a prefix for non-cluster keys.
+	// In cluster mode, keys with hashtags `{...}` are placed on the same node.
+	// We use the DB number to construct a prefix to simulate DBs in cluster mode.
+	tmpOpt, _ := redis.ParseURL("redis://" + addr)
+	prefix := fmt.Sprintf("DB%d", tmpOpt.DB)
+
 	m := MDSRedis{
 		Rdb:          rdb,
 		prefix:       prefix,
@@ -246,6 +99,7 @@ func NewRedisMeta(driver, addr string, conf *Config) (MDS, error) {
 	m.Init(&m.metesetting, true)
 	return &m, nil
 }
+
 func (m *MDSRedis) checkServerConfig() {
 	rawInfo, err := m.Rdb.Info(context.Background()).Result()
 	if err != nil {
@@ -275,16 +129,6 @@ func (m *MDSRedis) checkServerConfig() {
 		return
 	}
 	logger.Infof("Ping redis latency: %s", time.Since(start))
-}
-
-func extractBetweenCommas(s string) (string, error) {
-	first := strings.Index(s, ",")
-
-	second := strings.Index(s[first+1:], ",")
-
-	second += first + 1
-
-	return s[first+1 : second], nil
 }
 
 func (m *MDSRedis) Shutdown() error {

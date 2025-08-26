@@ -27,6 +27,9 @@ type Config struct {
 	Sid                uint64
 	SortDir            bool
 	FastStatfs         bool
+	TLSEnabled         bool
+	ReadTimeout        time.Duration
+	WriteTimeout       time.Duration
 }
 
 func NewMetaConfig() *Config {
@@ -49,6 +52,9 @@ func NewMetaConfig() *Config {
 		Sid:                0,
 		SortDir:            true,
 		FastStatfs:         true,
+		TLSEnabled:         false,
+		ReadTimeout:        10 * time.Second,
+		WriteTimeout:       10 * time.Second,
 	}
 }
 

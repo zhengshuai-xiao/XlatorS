@@ -63,17 +63,22 @@ Object Storage:对象存储，支持S3 协议
 * physical data object: 写盘的对象
 * HA: 支持数据高可用：例如MinIO里的EC Storage
 
-## 关键数据结构
+## 关键数据结构和概念
 
-**Namespace**
-
-```
-Namespace string
-NSInfo 	NSInfo
-backendBucket BucketInfo
-...
+**DD Namespace**
 
 ```
+What is DD namespace?
+Namespace is a string, it comes with bucketName
+So the format of intput bucket name is namespace.bucket
+Dedup Xlator gets namespace from bucket name.
+
+What does DD namespace use?
+all object in same DD namespace share same fp cache, in another words:
+they do deduplication within same DD namespace
+so it is the boundary of deduplication
+```
+
 
 ```
 //BucketOptions represents bucket options for ObjectLayer bucket operations
@@ -97,7 +102,6 @@ key: BucketName3 string, val:BucketInfo3
 //above bucketName is with namespace
 
 ```
-
 
 ```
 type BucketInfo struct {
@@ -280,4 +284,4 @@ Object Storage: 目前测试使用MinIO，MinIO支持集群模式
 
 ## 全局重删
 
-在分布式架构下，Dedup Xlator可以支持各个范围的重删，Bucket内重删、命名空间内重删、全局重删等
+在分布式架构下，Dedup Xlator支持自定义重删命名空间，它可以是单个Bucket内重删、也可以是多个Buckets间重删、也可以是全局重删，非常的灵活
