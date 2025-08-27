@@ -1,0 +1,392 @@
+package cryptocompress
+
+import (
+	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"fmt"
+	"io"
+	"net/http"
+	"strconv"
+	"sync"
+
+	"github.com/klauspost/compress/gzip" // Using a faster gzip implementation
+	miniogo "github.com/minio/minio-go/v7"
+	minio "github.com/minio/minio/cmd"
+	xhttp "github.com/minio/minio/cmd/http"
+	"github.com/minio/minio/pkg/auth"
+	"github.com/minio/minio/pkg/madmin"
+	"github.com/zhengshuai-xiao/XlatorS/internal"
+	S3client "github.com/zhengshuai-xiao/XlatorS/pkg/s3client"
+)
+
+const (
+	XlatorName = "CryptoCompress"
+	// Metadata key to store the initialization vector (IV)
+	metaIV = "X-Amz-Meta-Iv"
+	// Metadata key to store the original, uncompressed/unencrypted size.
+	metaOriginalSize = "X-Amz-Meta-Original-Size"
+)
+
+var logger = internal.GetLogger(XlatorName)
+
+type XlatorCryptoCompress struct {
+	minio.GatewayUnsupported
+	Client     *miniogo.Core
+	HTTPClient *http.Client
+	Metrics    *minio.BackendMetrics
+	wg         sync.WaitGroup
+	// WARNING: This is a hardcoded key for demonstration purposes only.
+	// In a real-world scenario, this MUST be replaced with a proper Key Management System (KMS).
+	encryptionKey []byte
+}
+
+func NewXlatorCryptoCompress(gConf *internal.Config) (*XlatorCryptoCompress, error) {
+	if gConf.Xlator != XlatorName {
+		return nil, fmt.Errorf("Invalid Xlator configuration (%s != %s)", gConf.Xlator, XlatorName)
+	}
+
+	metrics := minio.NewMetrics()
+	t := &minio.MetricsTransport{
+		Transport: minio.NewGatewayHTTPTransport(),
+		Metrics:   metrics,
+	}
+	s3 := &S3client.S3{Host: gConf.BackendAddr}
+	creds := auth.Credentials{}
+	client, err := s3.NewGatewayLayer(creds, t)
+	if err != nil {
+		logger.Errorf("failed to create S3 client: %v", err)
+		return nil, err
+	}
+
+	// IMPORTANT: Using a fixed, hardcoded key. This is NOT secure.
+	// A real implementation should integrate with a KMS.
+	// This key is 32 bytes for AES-256.
+	key := []byte("a-very-secret-key-for-this-demo!")
+
+	xlator := &XlatorCryptoCompress{
+		Client:        client,
+		HTTPClient:    &http.Client{Transport: t},
+		Metrics:       metrics,
+		encryptionKey: key,
+	}
+
+	logger.Infof("CryptoCompress Xlator initialized with backend: %s", gConf.BackendAddr)
+	return xlator, nil
+}
+
+// --- Bucket Operations ---
+// These are mostly pass-through to the metadata store, similar to Dedup Xlator.
+
+func (x *XlatorCryptoCompress) MakeBucketWithLocation(ctx context.Context, bucket string, opts minio.BucketOptions) error {
+	ok, err := x.Client.BucketExists(ctx, bucket)
+	if err != nil {
+		return minio.ErrorRespToObjectError(err, bucket)
+	}
+	if !ok {
+		err = x.Client.MakeBucket(ctx, bucket, miniogo.MakeBucketOptions{Region: opts.Location})
+		if err != nil {
+			return minio.ErrorRespToObjectError(err, bucket)
+		}
+	}
+	return nil
+}
+
+func (x *XlatorCryptoCompress) GetBucketInfo(ctx context.Context, bucket string) (bi minio.BucketInfo, err error) {
+	// This is not efficient, but it's the common way to implement this
+	// for S3 backends when only ListBuckets is available.
+	buckets, err := x.ListBuckets(ctx)
+	if err != nil {
+		return minio.BucketInfo{}, err
+	}
+	for _, b := range buckets {
+		if b.Name == bucket {
+			return b, nil
+		}
+	}
+	return minio.BucketInfo{}, minio.BucketNotFound{Bucket: bucket}
+}
+
+func (x *XlatorCryptoCompress) ListBuckets(ctx context.Context) ([]minio.BucketInfo, error) {
+	backendBuckets, err := x.Client.ListBuckets(ctx)
+	if err != nil {
+		return nil, minio.ErrorRespToObjectError(err)
+	}
+	buckets := make([]minio.BucketInfo, len(backendBuckets))
+	for i, b := range backendBuckets {
+		buckets[i] = minio.BucketInfo{Name: b.Name, Created: b.CreationDate}
+	}
+	return buckets, nil
+}
+
+func (x *XlatorCryptoCompress) DeleteBucket(ctx context.Context, bucket string, forceDelete bool) error {
+	err := x.Client.RemoveBucket(ctx, bucket)
+	return minio.ErrorRespToObjectError(err, bucket)
+}
+
+// --- Object Operations ---
+
+func (x *XlatorCryptoCompress) PutObject(ctx context.Context, bucket string, object string, r *minio.PutObjReader, opts minio.ObjectOptions) (objInfo minio.ObjectInfo, err error) {
+	logger.Infof("PutObject: %s/%s", bucket, object)
+
+	// 1. Create a pipe. We will write encrypted, compressed data to the pipe writer,
+	//    and the S3 client will read from the pipe reader.
+	pipeReader, pipeWriter := io.Pipe()
+
+	// 2. Set up the transformation pipeline in a goroutine.
+	//    Reader -> Gzip Writer -> AES CTR Stream Writer -> Pipe Writer
+	go func() {
+		defer pipeWriter.Close()
+
+		// Create AES cipher block
+		block, err := aes.NewCipher(x.encryptionKey)
+		if err != nil {
+			pipeWriter.CloseWithError(fmt.Errorf("failed to create cipher: %w", err))
+			return
+		}
+
+		// Create a new random IV (Initialization Vector) for each object.
+		// It's crucial that the IV is unique for each encryption.
+		iv := make([]byte, block.BlockSize())
+		if _, err := io.ReadFull(rand.Reader, iv); err != nil {
+			pipeWriter.CloseWithError(fmt.Errorf("failed to generate IV: %w", err))
+			return
+		}
+
+		// Store IV and original size in metadata. We need them for decryption.
+		opts.UserDefined[metaIV] = internal.BytesToHex(iv)
+		opts.UserDefined[metaOriginalSize] = strconv.FormatInt(r.Size(), 10)
+
+		// Create AES-CTR stream
+		stream := cipher.NewCTR(block, iv)
+		encryptWriter := &cipher.StreamWriter{S: stream, W: pipeWriter}
+
+		// Create Gzip writer
+		gzipWriter := gzip.NewWriter(encryptWriter)
+
+		// Copy data from the original reader through the pipeline
+		if _, err := io.Copy(gzipWriter, r); err != nil {
+			pipeWriter.CloseWithError(fmt.Errorf("failed during copy/compress/encrypt: %w", err))
+			return
+		}
+
+		// Close gzip writer to flush all data to the underlying writers.
+		if err := gzipWriter.Close(); err != nil {
+			pipeWriter.CloseWithError(fmt.Errorf("failed to close gzip writer: %w", err))
+			return
+		}
+	}()
+
+	// 3. Upload the data from the pipe reader to the backend S3.
+	//    The size is -1 because we don't know the final compressed/encrypted size beforehand.
+	uploadInfo, err := x.Client.PutObject(ctx, bucket, object, pipeReader, -1, opts.UserDefined[xhttp.ContentMD5], opts.UserDefined[xhttp.ContentSha256], opts)
+	if err != nil {
+		return minio.ObjectInfo{}, minio.ErrorRespToObjectError(err, bucket, object)
+	}
+
+	// 4. Store metadata in Redis.
+	objInfo = minio.ObjectInfo{
+		Bucket:      bucket,
+		Name:        object,
+		ModTime:     uploadInfo.LastModified,
+		Size:        r.Size(), // Store the original size
+		ETag:        uploadInfo.ETag,
+		UserDefined: minio.CleanMetadata(opts.UserDefined),
+		IsLatest:    true,
+	}
+
+	logger.Infof("Successfully uploaded %s/%s. Original size: %d, Stored size: %d", bucket, object, objInfo.Size, uploadInfo.Size)
+	return objInfo, nil
+}
+
+func (x *XlatorCryptoCompress) GetObject(ctx context.Context, bucket, object string, startOffset, length int64, writer io.Writer, etag string, opts minio.ObjectOptions) (err error) {
+	logger.Infof("GetObject: %s/%s", bucket, object)
+
+	// For simplicity, this implementation doesn't support range requests.
+	// Supporting them would require careful handling of compression and encryption boundaries.
+	if startOffset != 0 || length != -1 {
+		return minio.ErrorRespToObjectError(minio.NotImplemented{}, bucket, object)
+	}
+
+	// 1. Get object metadata from backend S3 to retrieve the IV.
+	objInfo, err := x.GetObjectInfo(ctx, bucket, object, opts)
+	if err != nil {
+		return minio.ErrorRespToObjectError(err, bucket, object)
+	}
+
+	ivHex, ok := objInfo.UserDefined[http.CanonicalHeaderKey(metaIV)]
+	if !ok {
+		return fmt.Errorf("missing IV in metadata for object %s/%s", bucket, object)
+	}
+	iv, err := internal.HexToBytes(ivHex)
+	if err != nil {
+		return fmt.Errorf("invalid IV format in metadata: %w", err)
+	}
+
+	// 2. Get the encrypted, compressed object from the backend S3.
+	s3Opts := miniogo.GetObjectOptions{}
+	s3Opts.ServerSideEncryption = opts.ServerSideEncryption
+
+	objectReader, _, _, err := x.Client.GetObject(ctx, bucket, object, s3Opts)
+	if err != nil {
+		return minio.ErrorRespToObjectError(err, bucket, object)
+	}
+	defer objectReader.Close()
+
+	// 3. Set up the decryption/decompression pipeline.
+	//    S3 Reader -> AES CTR Stream Reader -> Gzip Reader -> Final Writer
+
+	// Create AES cipher block
+	block, err := aes.NewCipher(x.encryptionKey)
+	if err != nil {
+		return fmt.Errorf("failed to create cipher: %w", err)
+	}
+
+	// Create AES-CTR stream
+	stream := cipher.NewCTR(block, iv)
+	decryptReader := &cipher.StreamReader{S: stream, R: objectReader}
+
+	// Create Gzip reader
+	gzipReader, err := gzip.NewReader(decryptReader)
+	if err != nil {
+		return fmt.Errorf("failed to create gzip reader: %w", err)
+	}
+	defer gzipReader.Close()
+
+	// 4. Copy the decrypted, decompressed data to the output writer.
+	if _, err = io.Copy(writer, gzipReader); err != nil {
+		return fmt.Errorf("failed during decrypt/decompress/copy: %w", err)
+	}
+
+	logger.Infof("Successfully downloaded and processed %s/%s", bucket, object)
+	return nil
+}
+
+func (x *XlatorCryptoCompress) GetObjectInfo(ctx context.Context, bucket, object string, opts minio.ObjectOptions) (minio.ObjectInfo, error) {
+	s3Opts := miniogo.StatObjectOptions{}
+	s3Opts.ServerSideEncryption = opts.ServerSideEncryption
+
+	s3ObjInfo, err := x.Client.StatObject(ctx, bucket, object, s3Opts)
+	if err != nil {
+		return minio.ObjectInfo{}, minio.ErrorRespToObjectError(err, bucket, object)
+	}
+
+	// Get original size from metadata
+	originalSizeStrList, ok := s3ObjInfo.UserMetadata[http.CanonicalHeaderKey(metaOriginalSize)]
+	var originalSize int64
+	if ok && len(originalSizeStrList) > 0 {
+		originalSize, _ = strconv.ParseInt(originalSizeStrList[0], 10, 64)
+	} else {
+		// Fallback for objects potentially uploaded without this metadata.
+		// This might be incorrect if the object is compressed.
+		originalSize = s3ObjInfo.Size
+	}
+
+	// Convert from minio-go ObjectInfo to minio ObjectInfo
+	return minio.ObjectInfo{
+		Bucket: bucket, Name: object, ModTime: s3ObjInfo.LastModified,
+		Size: originalSize, ETag: s3ObjInfo.ETag, UserDefined: minio.CleanMetadata(s3ObjInfo.UserMetadata), IsLatest: true,
+	}, nil
+}
+
+func (x *XlatorCryptoCompress) GetObjectNInfo(ctx context.Context, bucket, object string, rs *minio.HTTPRangeSpec, h http.Header, lockType minio.LockType, opts minio.ObjectOptions) (gr *minio.GetObjectReader, err error) {
+	objInfo, err := x.GetObjectInfo(ctx, bucket, object, opts)
+	if err != nil {
+		return nil, minio.ErrorRespToObjectError(err, bucket, object)
+	}
+
+	fn, off, length, err := minio.NewGetObjectReader(rs, objInfo, opts)
+	if err != nil {
+		return nil, minio.ErrorRespToObjectError(err, bucket, object)
+	}
+
+	pr, pw := io.Pipe()
+	go func() {
+		err := x.GetObject(ctx, bucket, object, off, length, pw, objInfo.ETag, opts)
+		pw.CloseWithError(err)
+	}()
+
+	pipeCloser := func() { pr.Close() }
+	return fn(pr, h, opts.CheckPrecondFn, pipeCloser)
+}
+
+func (x *XlatorCryptoCompress) DeleteObject(ctx context.Context, bucket, object string, opts minio.ObjectOptions) (minio.ObjectInfo, error) {
+	logger.Infof("DeleteObject: %s/%s", bucket, object)
+
+	// 1. Delete from backend S3
+	err := x.Client.RemoveObject(ctx, bucket, object, miniogo.RemoveObjectOptions{})
+	if err != nil {
+		// Log but don't fail if object is already gone from backend
+		if errResp, ok := err.(miniogo.ErrorResponse); ok && errResp.Code == "NoSuchKey" {
+			logger.Warnf("Object %s/%s not found in backend during deletion.", bucket, object)
+		} else {
+			return minio.ObjectInfo{}, minio.ErrorRespToObjectError(err, bucket, object)
+		}
+	}
+
+	return minio.ObjectInfo{Bucket: bucket, Name: object}, nil
+}
+
+// --- Other required methods ---
+
+func (x *XlatorCryptoCompress) Shutdown(ctx context.Context) error {
+	logger.Info("Shutting down CryptoCompress xlator...")
+	x.wg.Wait()
+	logger.Info("CryptoCompress xlator shut down gracefully.")
+	return nil
+}
+
+func (x *XlatorCryptoCompress) IsCompressionSupported() bool {
+	return false // The xlator handles it internally
+}
+
+func (x *XlatorCryptoCompress) IsEncryptionSupported() bool {
+	return true
+}
+
+func (x *XlatorCryptoCompress) IsReady(ctx context.Context) bool {
+	return true
+}
+
+func (x *XlatorCryptoCompress) StorageInfo(ctx context.Context) (si minio.StorageInfo, errs []error) {
+	si.Backend.Type = madmin.Gateway
+	return si, nil
+}
+
+func (x *XlatorCryptoCompress) ListObjects(ctx context.Context, bucket, prefix, marker, delimiter string, maxKeys int) (minio.ListObjectsInfo, error) {
+	s3Opts := miniogo.ListObjectsOptions{
+		Prefix:    prefix,
+		Marker:    marker,
+		Delimiter: delimiter,
+		MaxKeys:   maxKeys,
+	}
+
+	var loi minio.ListObjectsInfo
+	// Note: ListObjects is a convenience wrapper around ListObjectsV2.
+	// The minio-go client's ListObjects iterates through all objects and doesn't directly support
+	// server-side pagination (IsTruncated, NextMarker). This implementation will list all objects
+	// that match the criteria, ignoring the maxKeys limit for truncation.
+	objectCh, err := x.Client.ListObjects(ctx, bucket, s3Opts)
+	for object := range objectCh {
+		if object.Err != nil {
+			return minio.ListObjectsInfo{}, minio.ErrorRespToObjectError(object.Err, bucket)
+		}
+
+		// In minio-go, prefixes are also returned as ObjectInfo.
+		// They can be distinguished by an empty ETag.
+		if object.ETag == "" {
+			loi.Prefixes = append(loi.Prefixes, object.Key)
+		} else {
+			// For compressed/encrypted objects, the listed size is the stored size, not the original.
+			// A HEAD request would be needed for each object to get the original size from metadata, which is very inefficient.
+			// We will return the stored size here, which is standard for S3 listings.
+			loi.Objects = append(loi.Objects, minio.ObjectInfo{Name: object.Key, Size: object.Size, ModTime: object.LastModified, ETag: object.ETag, IsLatest: true})
+		}
+	}
+	return loi, nil
+}
+
+func (x *XlatorCryptoCompress) NewNSLock(bucket string, objects ...string) minio.RWLocker {
+	return &internal.StoreFLock{Owner: 123, Readonly: false}
+}

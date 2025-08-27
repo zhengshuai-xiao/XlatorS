@@ -319,26 +319,31 @@ func (m *MDSRedis) PutObjectMeta(object minio.ObjectInfo, manifestList []ChunkIn
 		logger.Errorf("failed to parse namespace and bucket: %s", err)
 		return err
 	}
+	manifestID, ok := object.UserDefined[ManifestIDKey]
+	if !ok || manifestID == "" {
+		return fmt.Errorf("manifest ID not found in object metadata for object %s/%s", object.Bucket, object.Name)
+	}
+
 	//write manifest
-	logger.Tracef("MDSRedis::PutObjectMeta: writing manifest for object[%s], manifestname:%s, len:%d", object.Name, object.UserTags, len(manifestList))
-	doidSet, err := m.writeManifestReturnDOidList(object.UserTags, manifestList)
+	logger.Tracef("MDSRedis::PutObjectMeta: writing manifest for object[%s], manifestname:%s, len:%d", object.Name, manifestID, len(manifestList))
+	doidSet, err := m.writeManifestReturnDOidList(manifestID, manifestList)
 	if err != nil {
 		//cleanup the manifest, ignore if it is failed
-		m.delManifest(ctx, object.UserTags)
+		m.delManifest(ctx, manifestID)
 		return err
 	}
 	//write reference
 	err = m.AddReference(ns, doidSet.Elements(), object.Name)
 	if err != nil {
 		//cleanup the manifest, ignore if it is failed
-		m.delManifest(ctx, object.UserTags)
+		m.delManifest(ctx, manifestID)
 		return err
 	}
 	//write object
 	jsondata, err := json.Marshal(object)
 	if err != nil {
 		//cleanup the manifest, ignore if it is failed
-		m.delManifest(ctx, object.UserTags)
+		m.delManifest(ctx, manifestID)
 		//cleanup the reference
 		m.RemoveReference(ns, doidSet.Elements(), object.Name)
 		return err
@@ -359,7 +364,6 @@ func (m *MDSRedis) GetObjectInfo(bucket string, obj string) (minio.ObjectInfo, e
 
 	err := m.GetObjectMeta(&objInfo)
 	if err != nil {
-		logger.Errorf("GetObjectInfo:failed to GetObjectInfo[%s] err: %s", objInfo.Name, err)
 		return objInfo, err
 	}
 	return objInfo, nil
@@ -404,8 +408,11 @@ func (m *MDSRedis) DelObjectMeta(bucket string, obj string) (dereferencedDObjIDs
 		logger.Errorf("failed to GetObjectMeta object:%s", objKey)
 		return nil, err
 	}
-	// The manifest ID is stored in the UserTags field.
-	mfid := objInfo.UserTags
+	// The manifest ID is stored in the UserDefined field.
+	mfid, ok := objInfo.UserDefined[ManifestIDKey]
+	if !ok || mfid == "" {
+		return nil, fmt.Errorf("manifest ID not found in object metadata for object %s/%s", bucket, obj)
+	}
 	// Step 2: Get the list of DOIDs from the manifest.
 	_, doidSet, err := m.getManifestAndDOIDSet(mfid)
 	if err != nil {
@@ -579,8 +586,10 @@ func (m *MDSRedis) GetObjectManifest(bucket, object string) (chunks []ChunkInMan
 		return nil, err
 	}
 	//get manifest
-	manifestid := objInfo.UserTags
-
+	manifestid, ok := objInfo.UserDefined[ManifestIDKey]
+	if !ok || manifestid == "" {
+		return nil, fmt.Errorf("manifest ID not found in object metadata for object %s/%s", bucket, object)
+	}
 	// Get the manifest chunks
 	logger.Tracef("manifestid:%s", manifestid)
 	chunks, err = m.GetManifest(manifestid)

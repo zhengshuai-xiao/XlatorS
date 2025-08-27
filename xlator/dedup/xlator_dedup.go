@@ -38,6 +38,7 @@ const (
 	XlatorName          = "Dedup"
 	DefaultNS           = "globalns"
 	BackendBucketPrefix = "dedup."
+	ManifestIDKey       = "Manifestid"
 )
 
 type XlatorDedup struct {
@@ -96,6 +97,7 @@ func NewXlatorDedup(gConf *internal.Config) (*XlatorDedup, error) {
 		return xlatorDedup, err
 	}*/
 	// Start the background GC worker
+	//TODO: only leader can launch GC, so need leader selection
 	xlatorDedup.startGC()
 	// Start the admin command listener
 	xlatorDedup.listenForAdminCommands()
@@ -288,6 +290,31 @@ func (x *XlatorDedup) PutObject(ctx context.Context, bucket string, object strin
 		return objInfo, err
 	}
 
+	// No metadata is set, allocate a new one.
+	if opts.UserDefined == nil {
+		opts.UserDefined = make(map[string]string)
+	}
+
+	if opts.UserDefined["etag"] == "" {
+		logger.Tracef("there is no etag, so set it with r.MD5CurrentHexString()")
+		opts.UserDefined["etag"] = r.MD5CurrentHexString()
+	}
+
+	// Check if an object with the same ETag already exists.
+	newEtag := opts.UserDefined["etag"]
+	oldObjInfo, err := x.Mdsclient.GetObjectInfo(bucket, object)
+	if err == nil {
+		// Object with same name exists, check ETag.
+		// The ETag is stored in UserTags.
+		if oldObjInfo.UserTags == newEtag {
+			logger.Infof("PutObject: ETag match for %s/%s. Skipping upload.", bucket, object)
+			// The object is identical, return the existing object's info.
+			return oldObjInfo, nil //fmt.Errorf("same object[%s] already exists. If you still want to upload this object, please use another object name", object)
+		}
+	}
+
+	//check if
+
 	manifestID, err := x.Mdsclient.GetIncreasedManifestID()
 	if err != nil {
 		logger.Errorf("failed to get increased manifest ID: %v", err)
@@ -316,11 +343,14 @@ func (x *XlatorDedup) PutObject(ctx context.Context, bucket string, object strin
 		Size:        0,
 		IsDir:       isDir,
 		AccTime:     time.Now(),
-		UserTags:    manifestID,
+		UserTags:    opts.UserDefined["etag"],
 		UserDefined: minio.CleanMetadata(opts.UserDefined),
 		IsLatest:    true,
 	}
-
+	if objInfo.UserDefined == nil {
+		objInfo.UserDefined = make(map[string]string)
+	}
+	objInfo.UserDefined[ManifestIDKey] = manifestID
 	logger.Info("PutObject 2")
 	var manifestList []ChunkInManifest
 	manifestList, err = x.writeObj(ctx, ns, r, &objInfo)
@@ -355,6 +385,7 @@ func (x *XlatorDedup) NewMultipartUpload(ctx context.Context, bucket string, obj
 	return
 }
 
+// TODO: add real clock
 func (x *XlatorDedup) NewNSLock(bucket string, objects ...string) minio.RWLocker {
 	logger.Tracef("%s: enter", internal.GetCurrentFuncName())
 	return &internal.StoreFLock{Owner: 123, Readonly: false}

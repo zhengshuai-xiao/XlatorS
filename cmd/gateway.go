@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"fmt"
 	"os"
 	"path"
 	"strconv"
@@ -100,7 +101,7 @@ func cmdGateway() *cli.Command {
 		&cli.StringFlag{
 			Name:  "xlator",
 			Value: "Dedup",
-			Usage: "the name of the translator: S3Forward/Dedup",
+			Usage: "the name of the translator: S3Forward/Dedup/CryptoCompress",
 		},
 	}
 
@@ -208,6 +209,24 @@ func gateway(c *cli.Context) error {
 				MetaAddr:    c.String("meta-addr"),
 			},
 		)
+	} else if c.String("xlator") == "CryptoCompress" { //cryptocompress.XlatorName {
+		/*xobject, err = cryptocompress.NewXlatorCryptoCompress(
+			&internal.Config{
+				Xlator:      c.String("xlator"),
+				MultiBucket: c.Bool("multi-buckets"),
+				KeepEtag:    c.Bool("keep-etag"),
+				Umask:       uint16(umask),
+				ObjTag:      c.Bool("object-tag"),
+				ObjMeta:     c.Bool("object-meta"),
+				HeadDir:     c.Bool("head-dir"),
+				HideDir:     c.Bool("hide-dir-object"),
+				ReadOnly:    readonly,
+				BackendAddr: c.String("backend-addr"),
+				MetaDriver:  "redis",
+				MetaAddr:    c.String("meta-addr"),
+			},
+		)*/
+		return fmt.Errorf("not implement for CryptoCompress")
 	}
 
 	if err != nil {
