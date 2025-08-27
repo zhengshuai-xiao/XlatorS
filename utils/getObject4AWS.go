@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -14,7 +15,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
 
-func getObjectFromAWS(endpoint, accessKey, secretKey, region, bucket, key, localFile string) error {
+func getObjectFromAWS(endpoint, accessKey, secretKey, region, bucket, key, localFile string) (int64, error) {
 	cfg, err := config.LoadDefaultConfig(
 		context.TODO(),
 		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(accessKey, secretKey, "")),
@@ -32,7 +33,7 @@ func getObjectFromAWS(endpoint, accessKey, secretKey, region, bucket, key, local
 		),
 	)
 	if err != nil {
-		return fmt.Errorf("failed to load AWS config: %v", err)
+		return 0, fmt.Errorf("failed to load AWS config: %v", err)
 	}
 
 	client := s3.NewFromConfig(cfg, func(o *s3.Options) {
@@ -44,21 +45,21 @@ func getObjectFromAWS(endpoint, accessKey, secretKey, region, bucket, key, local
 		Key:    aws.String(key),
 	})
 	if err != nil {
-		return fmt.Errorf("failed to get object: %v", err)
+		return 0, fmt.Errorf("failed to get object: %v", err)
 	}
 	defer resp.Body.Close()
 
 	outFile, err := os.Create(localFile)
 	if err != nil {
-		return fmt.Errorf("failed to create local file: %v", err)
+		return 0, fmt.Errorf("failed to create local file: %v", err)
 	}
 	defer outFile.Close()
 
-	_, err = io.Copy(outFile, resp.Body)
+	bytesCopied, err := io.Copy(outFile, resp.Body)
 	if err != nil {
-		return fmt.Errorf("failed to copy file to local: %v", err)
+		return 0, fmt.Errorf("failed to copy file to local: %v", err)
 	}
-	return nil
+	return bytesCopied, nil
 }
 
 func main() {
@@ -76,10 +77,16 @@ func main() {
 	// Parse command line flags
 	flag.Parse()
 
-	err := getObjectFromAWS(*endpoint, *accessKey, *secretKey, region, *bucket, *key, *localFile)
+	start := time.Now()
+	size, err := getObjectFromAWS(*endpoint, *accessKey, *secretKey, region, *bucket, *key, *localFile)
 	if err != nil {
 		log.Fatalf("Failed to download object: %v", err)
 	}
+	elapsed := time.Since(start)
+	throughput := float64(size) / (1024 * 1024) / elapsed.Seconds()
 
 	fmt.Printf(" %s/%s has been downloaded to %s successfully\n", *bucket, *key, *localFile)
+	fmt.Printf("  Size:       %d bytes\n", size)
+	fmt.Printf("  Time taken: %s\n", elapsed)
+	fmt.Printf("  Throughput: %.2f MB/s\n", throughput)
 }

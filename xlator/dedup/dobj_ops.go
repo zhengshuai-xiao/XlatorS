@@ -18,7 +18,6 @@ import (
 const (
 	bufferSize = 16 * 1024 * 1024
 	maxSize    = 16 * 1024 * 1024
-	filePath   = "/dedup/"
 )
 
 var buffPool = sync.Pool{
@@ -90,7 +89,7 @@ func (x *XlatorDedup) truncateDObj(ctx context.Context, dobj *DObj) (err error) 
 }
 func (x *XlatorDedup) getDobjPathFromLocal(dobj_key string) string {
 	//read data from object
-	return filePath + dobj_key
+	return x.dobjCachePath + dobj_key
 }
 func (x *XlatorDedup) newDObj(dobj *DObj) (err error) {
 	doid, err := x.Mdsclient.GetIncreasedDOID()
@@ -360,8 +359,11 @@ func (x *XlatorDedup) getDataObject(bucket, object string, o minio.ObjectOptions
 				logger.Errorf("failed to write object[%s] to local disk: %s", object, err)
 				return DObjReader{}, err
 			}
+		} else {
+			logger.Errorf("failed to stat object[%s] on local disk: %s", dobjReader.path, err)
+			return
 		}
-		return
+
 	}
 	logger.Tracef("read data object[%s] on local disk", dobjReader.path)
 	dobjReader.bucket = bucket
@@ -426,9 +428,9 @@ func (x *XlatorDedup) readDataObject(backendBucket string, chunks []ChunkInManif
 		}
 
 		// Find the chunk's info within the data object.
-		fpinDObj, fpOk := dobjReader.fpmap[string(chunk.FP[:])]
+		fpinDObj, fpOk := dobjReader.fpmap[chunk.FP]
 		if !fpOk {
-			err = fmt.Errorf("readDataObject: fingerprint not found in data object %d", chunk.DOid)
+			err = fmt.Errorf("readDataObject: fingerprint:%s not found in data object %d", internal.StringToHex(chunk.FP), chunk.DOid)
 			logger.Error(err)
 			return err
 		}

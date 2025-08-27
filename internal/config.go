@@ -3,19 +3,20 @@ package internal
 import "github.com/minio/minio-go/v7/pkg/credentials"
 
 type Config struct {
-	Xlator      string
-	MultiBucket bool
-	KeepEtag    bool
-	Umask       uint16
-	ObjTag      bool
-	ObjMeta     bool
-	HeadDir     bool
-	HideDir     bool
-	ReadOnly    bool
-	BackendAddr string
-	Creds       *credentials.Credentials
-	MetaDriver  string
-	MetaAddr    string
+	Xlator        string
+	MultiBucket   bool
+	KeepEtag      bool
+	Umask         uint16
+	ObjTag        bool
+	ObjMeta       bool
+	HeadDir       bool
+	HideDir       bool
+	ReadOnly      bool
+	BackendAddr   string
+	Creds         *credentials.Credentials
+	MetaDriver    string
+	MetaAddr      string
+	DownloadCache string
 }
 
 const (

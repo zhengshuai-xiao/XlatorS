@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -47,12 +48,13 @@ const (
 
 type XlatorDedup struct {
 	minio.GatewayUnsupported
-	Client     *miniogo.Core
-	HTTPClient *http.Client
-	Metrics    *minio.BackendMetrics
-	Mdsclient  MDS
-	stopGC     chan struct{}  // Channel to signal GC stop
-	wg         sync.WaitGroup // WaitGroup for graceful shutdown
+	Client        *miniogo.Core
+	HTTPClient    *http.Client
+	Metrics       *minio.BackendMetrics
+	Mdsclient     MDS
+	dobjCachePath string         // The local directory used to cache data objects.
+	stopGC        chan struct{}  // Channel to signal GC stop
+	wg            sync.WaitGroup // WaitGroup for graceful shutdown
 }
 
 var logger = internal.GetLogger("XlatorDedup")
@@ -90,10 +92,25 @@ func NewXlatorDedup(gConf *internal.Config) (*XlatorDedup, error) {
 		HTTPClient: &http.Client{
 			Transport: t,
 		},
-		Metrics:   metrics,
-		Mdsclient: redismeta,
-		stopGC:    make(chan struct{}),
+		Metrics:       metrics,
+		Mdsclient:     redismeta,
+		dobjCachePath: gConf.DownloadCache,
+		stopGC:        make(chan struct{}),
 	}
+
+	// Validate the cache path. An empty path would cause silent failure.
+	if xlatorDedup.dobjCachePath == "" {
+		err := fmt.Errorf("data object cache path (downloadCache) cannot be empty")
+		logger.Errorf(err.Error())
+		return nil, err
+	}
+
+	// Ensure the local cache directory for data objects exists.
+	if err := os.MkdirAll(xlatorDedup.dobjCachePath, 0750); err != nil {
+		logger.Errorf("failed to create data object cache directory %s: %v", xlatorDedup.dobjCachePath, err)
+		return nil, err
+	}
+	logger.Infof("Data object cache directory '%s' is ready.", xlatorDedup.dobjCachePath)
 
 	/*err = xlatorDedup.CreateBackendBucket()
 	if err != nil {
@@ -294,6 +311,18 @@ func (x *XlatorDedup) PutObject(ctx context.Context, bucket string, object strin
 		return objInfo, err
 	}
 
+	backendBucket := GetBackendBucketName(ns)
+	exists, err := x.Client.BucketExists(ctx, backendBucket)
+	if err != nil {
+		logger.Errorf("PutObject: failed to check backend bucket %s existence: %v", backendBucket, err)
+		return objInfo, minio.ErrorRespToObjectError(err, backendBucket)
+	}
+	if !exists {
+		err = fmt.Errorf("internal error: backend bucket %s not found", backendBucket)
+		logger.Error(err)
+		return objInfo, minio.ErrorRespToObjectError(err, bucket)
+	}
+
 	// No metadata is set, allocate a new one.
 	if opts.UserDefined == nil {
 		opts.UserDefined = make(map[string]string)
@@ -395,6 +424,23 @@ func (x *XlatorDedup) NewMultipartUpload(ctx context.Context, bucket string, obj
 		return "", minio.BucketNotFound{Bucket: bucket}
 	}
 
+	ns, _, err := ParseNamespaceAndBucket(bucket)
+	if err != nil {
+		logger.Errorf("NewMultipartUpload: failed to parse namespace from bucket %s: %v", bucket, err)
+		return "", err
+	}
+
+	backendBucket := GetBackendBucketName(ns)
+	exists, err := x.Client.BucketExists(ctx, backendBucket)
+	if err != nil {
+		logger.Errorf("NewMultipartUpload: failed to check backend bucket %s existence: %v", backendBucket, err)
+		return "", minio.ErrorRespToObjectError(err, backendBucket)
+	}
+	if !exists {
+		err = fmt.Errorf("internal error: backend bucket %s not found", backendBucket)
+		logger.Error(err)
+		return "", minio.ErrorRespToObjectError(err, bucket)
+	}
 	// Following PutObject, we get a manifest ID first. This will also serve as the upload ID.
 	uploadID, err = x.Mdsclient.GetIncreasedManifestID()
 	if err != nil {
@@ -645,7 +691,7 @@ func (x *XlatorDedup) DeleteObject(ctx context.Context, bucket string, object st
 			}
 		}
 	}
-
+	logger.Infof("DeleteObject: successfully deleted object %s/%s", bucket, object)
 	return minio.ObjectInfo{
 		Bucket: bucket,
 		Name:   object,

@@ -128,7 +128,7 @@ func main() {
 	}
 
 	// Create context with timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 	defer cancel()
 
 	// Initialize client
@@ -145,11 +145,14 @@ func main() {
 	}
 
 	// Upload file
+	start := time.Now()
 	uploadInfo, err := uploadLocalFile(ctx, client, *bucketName, *objectName, *localFile, *disableMultipart, *partSize)
 	if err != nil {
 		fmt.Printf("File upload failed: %v\n", err)
 		os.Exit(1)
 	}
+	elapsed := time.Since(start)
+	throughput := float64(uploadInfo.Size) / (1024 * 1024) / elapsed.Seconds()
 
 	// Print success message
 	fmt.Printf("File uploaded successfully:\n")
@@ -157,4 +160,6 @@ func main() {
 	fmt.Printf("  Object:     %s\n", uploadInfo.Key)
 	fmt.Printf("  Size:       %d bytes\n", uploadInfo.Size)
 	fmt.Printf("  ETag:       %s\n", uploadInfo.ETag)
+	fmt.Printf("  Time taken: %s\n", elapsed)
+	fmt.Printf("  Throughput: %.2f MB/s\n", throughput)
 }

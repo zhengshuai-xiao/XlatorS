@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path"
+	"path/filepath"
 	"strconv"
 
 	mcli "github.com/minio/cli"
@@ -79,9 +80,9 @@ func cmdGateway() *cli.Command {
 			Usage: "interval to reload gateway IAM from configuration",
 		},
 		&cli.StringFlag{
-			Name:  "mountpoint",
-			Value: "s3gateway",
-			Usage: "the mount point for current volume (to follow symlink)",
+			Name:  "downloadCache",
+			Value: "/dedup_data/",
+			Usage: "the download Cache path for Dedup",
 		},
 		&cli.StringFlag{
 			Name:  "backend-addr",
@@ -129,6 +130,19 @@ var xobject minio.ObjectLayer
 
 func gateway(c *cli.Context) error {
 	//setup(c, 2)
+	logFile := c.String("log")
+	if logFile != "" {
+
+		if err := os.MkdirAll(filepath.Dir(logFile), 0750); err != nil {
+			logrus.Fatalf("Failed to create log directory: %v", err)
+		}
+
+		f, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0660)
+		if err != nil {
+			logrus.Fatalf("Failed to open log file %s: %v", logFile, err)
+		}
+		logrus.SetOutput(f)
+	}
 	ak := os.Getenv("MINIO_ROOT_USER")
 	if ak == "" {
 		ak = os.Getenv("MINIO_ACCESS_KEY")
@@ -195,18 +209,19 @@ func gateway(c *cli.Context) error {
 	} else if c.String("xlator") == dedup.XlatorName {
 		xobject, err = dedup.NewXlatorDedup(
 			&internal.Config{
-				Xlator:      c.String("xlator"),
-				MultiBucket: c.Bool("multi-buckets"),
-				KeepEtag:    c.Bool("keep-etag"),
-				Umask:       uint16(umask),
-				ObjTag:      c.Bool("object-tag"),
-				ObjMeta:     c.Bool("object-meta"),
-				HeadDir:     c.Bool("head-dir"),
-				HideDir:     c.Bool("hide-dir-object"),
-				ReadOnly:    readonly,
-				BackendAddr: c.String("backend-addr"),
-				MetaDriver:  "redis",
-				MetaAddr:    c.String("meta-addr"),
+				Xlator:        c.String("xlator"),
+				MultiBucket:   c.Bool("multi-buckets"),
+				KeepEtag:      c.Bool("keep-etag"),
+				Umask:         uint16(umask),
+				ObjTag:        c.Bool("object-tag"),
+				ObjMeta:       c.Bool("object-meta"),
+				HeadDir:       c.Bool("head-dir"),
+				HideDir:       c.Bool("hide-dir-object"),
+				ReadOnly:      readonly,
+				BackendAddr:   c.String("backend-addr"),
+				MetaDriver:    "redis",
+				MetaAddr:      c.String("meta-addr"),
+				DownloadCache: c.String("downloadCache"),
 			},
 		)
 	} else if c.String("xlator") == "CryptoCompress" { //cryptocompress.XlatorName {

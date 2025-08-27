@@ -57,6 +57,65 @@ const (
 	DeletedDOIDKey = "deletedDOID"
 )
 
+const addRefScript = `
+-- KEYS[1]: the hash key (e.g., "namespace.Ref")
+-- ARGV[1]: the object name to add
+-- ARGV[2...]: the list of dobjID strings
+local ref_key = KEYS[1]
+local obj_name_to_add = ARGV[1]
+for i = 2, #ARGV do
+    local dobj_id = ARGV[i]
+    local current_refs_str = redis.call('HGET', ref_key, dobj_id)
+    if not current_refs_str or current_refs_str == '' then
+        redis.call('HSET', ref_key, dobj_id, obj_name_to_add)
+    else
+        local found = false
+        for ref in string.gmatch(current_refs_str, "([^,]+)") do
+            if ref == obj_name_to_add then
+                found = true
+                break
+            end
+        end
+        if not found then
+            local new_refs_str = current_refs_str .. ',' .. obj_name_to_add
+            redis.call('HSET', ref_key, dobj_id, new_refs_str)
+        end
+    end
+end
+return 1`
+
+const removeRefScript = `
+-- KEYS[1]: the hash key (e.g., "namespace.Ref")
+-- ARGV[1]: the object name to remove
+-- ARGV[2...]: the list of dobjID strings
+local ref_key = KEYS[1]
+local obj_name_to_remove = ARGV[1]
+local dereferenced_dobj_ids = {}
+for i = 2, #ARGV do
+    local dobj_id = ARGV[i]
+    local current_refs_str = redis.call('HGET', ref_key, dobj_id)
+    if current_refs_str then
+        local new_refs = {}
+        local found = false
+        for ref in string.gmatch(current_refs_str, "([^,]+)") do
+            if ref == obj_name_to_remove then
+                found = true
+            else
+                table.insert(new_refs, ref)
+            end
+        end
+        if found then
+            if #new_refs == 0 then
+                redis.call('HDEL', ref_key, dobj_id)
+                table.insert(dereferenced_dobj_ids, dobj_id)
+            else
+                redis.call('HSET', ref_key, dobj_id, table.concat(new_refs, ','))
+            end
+        end
+    end
+end
+return dereferenced_dobj_ids`
+
 type MDSRedis struct {
 	//*baseMeta
 	Rdb          redis.UniversalClient
@@ -65,6 +124,8 @@ type MDSRedis struct {
 	ObjectPrefic string //OBJ
 	shaLookup    string // The SHA returned by Redis for the loaded `scriptLookup`
 	shaResolve   string // The SHA returned by Redis for the loaded `scriptResolve`
+	shaAddRef    string
+	shaRemoveRef string
 	metesetting  Format
 }
 
@@ -96,8 +157,27 @@ func NewRedisMeta(driver, addr string, conf *Config) (MDS, error) {
 	}
 	//m.en = m
 	m.checkServerConfig()
+	if err := m.loadScripts(); err != nil {
+		return nil, err
+	}
 	m.Init(&m.metesetting, true)
 	return &m, nil
+}
+
+func (m *MDSRedis) loadScripts() (err error) {
+	ctx := context.Background()
+	m.shaAddRef, err = m.Rdb.ScriptLoad(ctx, addRefScript).Result()
+	if err != nil {
+		logger.Errorf("failed to load addRefScript: %v", err)
+		return err
+	}
+	m.shaRemoveRef, err = m.Rdb.ScriptLoad(ctx, removeRefScript).Result()
+	if err != nil {
+		logger.Errorf("failed to load removeRefScript: %v", err)
+		return err
+	}
+	logger.Info("Successfully loaded Redis Lua scripts for reference counting.")
+	return nil
 }
 
 func (m *MDSRedis) checkServerConfig() {
@@ -527,38 +607,48 @@ func (m *MDSRedis) GetIncreasedManifestID() (string, error) {
 
 func (m *MDSRedis) WriteManifest(manifestid string, manifestList []ChunkInManifest) error {
 	ctx := context.Background()
-	for _, chunk := range manifestList {
+	if len(manifestList) == 0 {
+		return nil
+	}
+
+	serializedChunks := make([]interface{}, len(manifestList))
+	for i, chunk := range manifestList {
 		str, err := internal.SerializeToString(chunk)
 		if err != nil {
 			logger.Errorf("MDSRedis::failed to SerializeToString chunk[%v] : %s", chunk, err)
 			return err
 		}
-		_, err = m.Rdb.RPush(ctx, manifestid, str).Result()
-		if err != nil {
-			logger.Errorf("MDSRedis::failed to RPush chunk[%v] into manifest[%s] : %s", chunk, manifestid, err)
-			return err
-		}
+		serializedChunks[i] = str
 	}
-	return nil
+
+	_, err := m.Rdb.RPush(ctx, manifestid, serializedChunks...).Result()
+	if err != nil {
+		logger.Errorf("MDSRedis::failed to RPush chunks into manifest[%s] : %s", manifestid, err)
+	}
+	return err
 }
 
 func (m *MDSRedis) writeManifestReturnDOidList(manifestid string, manifestList []ChunkInManifest) (doidSet *internal.UInt64Set, err error) {
 	ctx := context.Background()
 	doidSet = internal.NewUInt64Set()
-	for _, chunk := range manifestList {
+	if len(manifestList) == 0 {
+		return doidSet, nil
+	}
 
+	serializedChunks := make([]interface{}, len(manifestList))
+	for i, chunk := range manifestList {
 		doidSet.Add(chunk.DOid)
-
 		str, err := internal.SerializeToString(chunk)
 		if err != nil {
 			logger.Errorf("MDSRedis::failed to SerializeToString chunk[%v] : %s", chunk, err)
 			return nil, err
 		}
-		_, err = m.Rdb.RPush(ctx, manifestid, str).Result()
-		if err != nil {
-			logger.Errorf("MDSRedis::failed to RPush chunk[%v] into manifest[%s] : %s", chunk, manifestid, err)
-			return nil, err
-		}
+		serializedChunks[i] = str
+	}
+	_, err = m.Rdb.RPush(ctx, manifestid, serializedChunks...).Result()
+	if err != nil {
+		logger.Errorf("MDSRedis::failed to RPush chunks into manifest[%s] : %s", manifestid, err)
+		return nil, err
 	}
 	return doidSet, nil
 }
@@ -871,135 +961,67 @@ func (m *MDSRedis) setFingerprint(namespace string, fp string, dpval FPValInMDS)
 }
 
 // AddReference adds an object reference to multiple Data Objects in a batch.
-// It uses a Redis WATCH transaction to ensure atomicity.
-// For each dataObjectID, it retrieves the current reference list (a comma-separated string),
-// and appends the objectName if it does not already exist.
-// Finally, it uses a Pipeline to update all changes in a batch.
+// It uses a Redis Lua script to ensure atomicity and avoid WATCH-based transaction failures.
 func (m *MDSRedis) AddReference(namespace string, dataObjectIDs []uint64, objectName string) error {
 	ctx := context.Background()
+	if len(dataObjectIDs) == 0 {
+		return nil
+	}
 	refKey := GetRefKey(namespace)
 
-	err := m.Rdb.Watch(ctx, func(tx *redis.Tx) error {
-		newValues := make(map[string]string)
-		for _, dobjID := range dataObjectIDs {
-			dobjIDStr := strconv.FormatUint(dobjID, 10)
-			val, err := tx.HGet(ctx, refKey, dobjIDStr).Result()
-			if err != nil && err != redis.Nil {
-				return err // Real error, fail transaction
-			}
-
-			var newVal string
-			if err == redis.Nil {
-				// First reference
-				newVal = objectName
-			} else {
-				objNames := strings.Split(val, ",")
-				found := false
-				for _, name := range objNames {
-					if name == objectName {
-						found = true
-						break
-					}
-				}
-				if found {
-					continue // Already exists, skip this one
-				}
-				newVal = val + "," + objectName
-			}
-			newValues[dobjIDStr] = newVal
-		}
-
-		if len(newValues) > 0 {
-			_, err := tx.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
-				for id, val := range newValues {
-					pipe.HSet(ctx, refKey, id, val)
-				}
-				return nil
-			})
-			return err
-		}
-		return nil
-	}, refKey)
-
-	if err != nil {
-		logger.Errorf("AddReference: failed batch transaction for objName %s: %v", objectName, err)
+	args := make([]interface{}, 0, len(dataObjectIDs)+1)
+	args = append(args, objectName)
+	for _, id := range dataObjectIDs {
+		args = append(args, strconv.FormatUint(id, 10))
 	}
-	return err
+
+	err := m.Rdb.EvalSha(ctx, m.shaAddRef, []string{refKey}, args...).Err()
+	if err != nil {
+		logger.Errorf("AddReference: failed to execute addRefScript for objName %s: %v", objectName, err)
+		return err
+	}
+	return nil
 }
 
 // RemoveReference removes an object reference from multiple Data Objects in a batch.
-// It uses a Redis WATCH transaction to ensure atomicity.
-// The function iterates through all dataObjectIDs, removing the specified objectName from each.
-// If a Data Object's reference list becomes empty after removal, its field is deleted from the hash,
-// and its ID is added to the returned list.
-//
-// The return value, dereferencedDObjIDs, is a []uint64 slice containing the IDs of all Data Objects
-// whose reference count dropped to zero during this operation. This list can be used for subsequent
-// garbage collection (GC).
+// It uses a Redis Lua script to ensure atomicity and avoid WATCH-based transaction failures.
+// The script returns a list of DOIDs that have become dereferenced.
 func (m *MDSRedis) RemoveReference(namespace string, dataObjectIDs []uint64, objectName string) (dereferencedDObjIDs []uint64, err error) {
 	ctx := context.Background()
+	if len(dataObjectIDs) == 0 {
+		return nil, nil
+	}
 	refKey := GetRefKey(namespace)
 
-	err = m.Rdb.Watch(ctx, func(tx *redis.Tx) error {
-		updates := make(map[string]interface{})
-		deletes := make([]string, 0)
-		dereferencedDObjIDs = nil // Reset for each transaction attempt
+	args := make([]interface{}, 0, len(dataObjectIDs)+1)
+	args = append(args, objectName)
+	for _, id := range dataObjectIDs {
+		args = append(args, strconv.FormatUint(id, 10))
+	}
 
-		for _, dobjID := range dataObjectIDs {
-			dobjIDStr := strconv.FormatUint(dobjID, 10)
-			val, err := tx.HGet(ctx, refKey, dobjIDStr).Result()
-			if err == redis.Nil {
-				logger.Warnf("RemoveReference: data object %d not found in ref map for namespace %s", dobjID, namespace)
-				continue // Not an error, just nothing to do for this ID
-			}
-			if err != nil {
-				return err // Real error, fail transaction
-			}
-
-			objNames := strings.Split(val, ",")
-
-			found := false
-			var newObjNames []string
-			for _, name := range objNames {
-				if name != objectName {
-					newObjNames = append(newObjNames, name)
-				} else {
-					found = true
-				}
-			}
-
-			if !found {
-				logger.Warnf("RemoveReference: object name %s not found for data object %d", objectName, dobjID)
-				continue // Not an error, reference was not present for this ID
-			}
-
-			if len(newObjNames) == 0 {
-				deletes = append(deletes, dobjIDStr)
-				dereferencedDObjIDs = append(dereferencedDObjIDs, dobjID)
-			} else {
-				updates[dobjIDStr] = strings.Join(newObjNames, ",")
-			}
-		}
-
-		if len(updates) > 0 || len(deletes) > 0 {
-			_, err := tx.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
-				if len(updates) > 0 {
-					pipe.HSet(ctx, refKey, updates)
-				}
-				if len(deletes) > 0 {
-					pipe.HDel(ctx, refKey, deletes...)
-				}
-				return nil
-			})
-			return err
-		}
-		return nil
-	}, refKey)
-
+	result, err := m.Rdb.EvalSha(ctx, m.shaRemoveRef, []string{refKey}, args...).Result()
 	if err != nil {
-		logger.Errorf("RemoveReference: failed batch transaction for objName %s: %v", objectName, err)
+		// The error message from the user indicates this is where the failure occurs.
+		// The new error message will be more specific.
+		logger.Errorf("RemoveReference: failed to execute removeRefScript for objName %s: %v", objectName, err)
 		return nil, err
 	}
+
+	// The Lua script returns a table (slice in Go) of dereferenced DOID strings.
+	if dereferencedIDs, ok := result.([]interface{}); ok {
+		dereferencedDObjIDs = make([]uint64, 0, len(dereferencedIDs))
+		for _, idVal := range dereferencedIDs {
+			if idStr, ok := idVal.(string); ok {
+				id, err := strconv.ParseUint(idStr, 10, 64)
+				if err != nil {
+					logger.Warnf("RemoveReference: could not parse dereferenced DOID '%s' from script result: %v", idStr, err)
+					continue
+				}
+				dereferencedDObjIDs = append(dereferencedDObjIDs, id)
+			}
+		}
+	}
+
 	return dereferencedDObjIDs, nil
 }
 
