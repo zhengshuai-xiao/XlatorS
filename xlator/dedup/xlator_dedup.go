@@ -16,15 +16,19 @@ package dedup
 
 import (
 	"context"
+	"crypto/md5"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
 	miniogo "github.com/minio/minio-go/v7"
+	"github.com/redis/go-redis/v9"
 	"github.com/zhengshuai-xiao/XlatorS/internal"
 
 	minio "github.com/minio/minio/cmd"
@@ -305,15 +309,13 @@ func (x *XlatorDedup) PutObject(ctx context.Context, bucket string, object strin
 	oldObjInfo, err := x.Mdsclient.GetObjectInfo(bucket, object)
 	if err == nil {
 		// Object with same name exists, check ETag.
-		// The ETag is stored in UserTags.
-		if oldObjInfo.UserTags == newEtag {
+		// The ETag is stored in the ETag field.
+		if oldObjInfo.ETag == newEtag {
 			logger.Infof("PutObject: ETag match for %s/%s. Skipping upload.", bucket, object)
 			// The object is identical, return the existing object's info.
 			return oldObjInfo, nil //fmt.Errorf("same object[%s] already exists. If you still want to upload this object, please use another object name", object)
 		}
 	}
-
-	//check if
 
 	manifestID, err := x.Mdsclient.GetIncreasedManifestID()
 	if err != nil {
@@ -322,7 +324,6 @@ func (x *XlatorDedup) PutObject(ctx context.Context, bucket string, object strin
 	}
 	logger.Trace("PutObject 1")
 	isDir := false
-	var etag string
 	if strings.HasSuffix(object, sep) {
 		//TODO: is it meaningful???
 		isDir = true
@@ -338,12 +339,11 @@ func (x *XlatorDedup) PutObject(ctx context.Context, bucket string, object strin
 	objInfo = minio.ObjectInfo{
 		Bucket:      bucket,
 		Name:        object,
-		ETag:        etag,
+		ETag:        opts.UserDefined["etag"],
 		ModTime:     time.Now(),
 		Size:        0,
 		IsDir:       isDir,
 		AccTime:     time.Now(),
-		UserTags:    opts.UserDefined["etag"],
 		UserDefined: minio.CleanMetadata(opts.UserDefined),
 		IsLatest:    true,
 	}
@@ -381,8 +381,236 @@ func (x *XlatorDedup) PutObject(ctx context.Context, bucket string, object strin
 }
 
 func (x *XlatorDedup) NewMultipartUpload(ctx context.Context, bucket string, object string, opts minio.ObjectOptions) (uploadID string, err error) {
-	logger.Tracef("%s: enter", internal.GetCurrentFuncName())
-	return
+	logger.Infof("%s: enter: bucket=%s, object=%s", internal.GetCurrentFuncName(), bucket, object)
+
+	if err = ValidateBucketNameFormat(bucket); err != nil {
+		logger.Errorf("invalid bucket name format for %s: %v", bucket, err)
+		return "", err
+	}
+	exist, err := x.Mdsclient.BucketExist(bucket)
+	if err != nil {
+		return "", minio.ErrorRespToObjectError(err, bucket)
+	}
+	if !exist {
+		return "", minio.BucketNotFound{Bucket: bucket}
+	}
+
+	// Following PutObject, we get a manifest ID first. This will also serve as the upload ID.
+	uploadID, err = x.Mdsclient.GetIncreasedManifestID()
+	if err != nil {
+		logger.Errorf("failed to get a unique ID for multipart upload: %v", err)
+		return "", err
+	}
+
+	// Create a temporary ObjectInfo to hold the state of the multipart upload.
+	// This is similar to how PutObject prepares an ObjectInfo.
+	// The final size and ETag will be set upon completion.
+	objInfo := minio.ObjectInfo{
+		Bucket:      bucket,
+		Name:        object,
+		ModTime:     time.Now(), // Represents initiation time
+		UserDefined: minio.CleanMetadata(opts.UserDefined),
+	}
+	if objInfo.UserDefined == nil {
+		objInfo.UserDefined = make(map[string]string)
+	}
+	// We store the manifest ID (which is our upload ID) in the UserDefined map.
+	// This is consistent with how PutObject handles its manifest and will be needed
+	// by CompleteMultipartUpload.
+	objInfo.UserDefined[ManifestIDKey] = uploadID
+
+	// Now, we need to persist this temporary object info, keyed by the uploadID.
+	err = x.Mdsclient.InitMultipartUpload(uploadID, objInfo)
+	if err != nil {
+		logger.Errorf("failed to initialize multipart upload in metadata store for %s/%s: %v", bucket, object, err)
+		return "", err
+	}
+
+	logger.Infof("Started new multipart upload for %s/%s with upload ID %s", bucket, object, uploadID)
+	return uploadID, nil
+}
+
+func (x *XlatorDedup) PutObjectPart(ctx context.Context, bucket string, object string, uploadID string, partID int, r *minio.PutObjReader, opts minio.ObjectOptions) (pi minio.PartInfo, e error) {
+	logger.Infof("%s: enter: bucket=%s, object=%s, uploadID=%s, partID=%d", internal.GetCurrentFuncName(), bucket, object, uploadID, partID)
+
+	// 1. Get multipart upload info to verify the call and get namespace
+	objInfo, err := x.Mdsclient.GetMultipartUploadInfo(uploadID)
+	if err != nil {
+		logger.Errorf("PutObjectPart: failed to get multipart upload info for uploadID %s: %v", uploadID, err)
+		if err == redis.Nil {
+			return pi, minio.InvalidUploadID{UploadID: uploadID}
+		}
+		return pi, err
+	}
+
+	// Verify that the request parameters match the initiated upload
+	if objInfo.Bucket != bucket || objInfo.Name != object {
+		logger.Errorf("PutObjectPart: request parameters mismatch. Expected %s/%s, got %s/%s", objInfo.Bucket, objInfo.Name, bucket, object)
+		return pi, minio.InvalidUploadID{UploadID: uploadID}
+	}
+
+	ns, _, err := ParseNamespaceAndBucket(bucket)
+	if err != nil {
+		logger.Errorf("PutObjectPart: failed to parse namespace from bucket %s: %v", bucket, err)
+		return pi, err
+	}
+
+	// 2. Process data stream: chunk, dedup, and write new data chunks
+	partSize, manifestList, err := x.writePart(ctx, ns, r)
+	if err != nil {
+		logger.Errorf("PutObjectPart: failed to process part data for uploadID %s, partID %d: %v", uploadID, partID, err)
+		return pi, err
+	}
+
+	// 3. Store part metadata and manifest
+	partInfo := minio.PartInfo{
+		PartNumber:   partID,
+		ETag:         r.MD5CurrentHexString(),
+		Size:         partSize,
+		LastModified: time.Now().UTC(),
+	}
+
+	err = x.Mdsclient.AddMultipartPart(uploadID, partID, partInfo, manifestList)
+	if err != nil {
+		logger.Errorf("PutObjectPart: failed to store part metadata for uploadID %s, partID %d: %v", uploadID, partID, err)
+		return pi, err
+	}
+
+	logger.Infof("Successfully uploaded part %d for %s/%s (uploadID: %s), size: %d", partID, bucket, object, uploadID, partSize)
+	return partInfo, nil
+}
+
+// computeCompleteMultipartUploadETag calculates the ETag for a completed multipart upload.
+// The ETag is the MD5 hash of the concatenated binary MD5 hashes of each part,
+// followed by a hyphen and the number of parts.
+// e.g., "d41d8cd98f00b204e9800998ecf8427e-1"
+func computeCompleteMultipartUploadETag(partETags [][]byte) string {
+	var etagBytes []byte
+	for _, partETag := range partETags {
+		etagBytes = append(etagBytes, partETag...)
+	}
+	h := md5.New()
+	h.Write(etagBytes)
+	md5sum := h.Sum(nil)
+	return fmt.Sprintf("%s-%d", hex.EncodeToString(md5sum), len(partETags))
+}
+
+func (x *XlatorDedup) CompleteMultipartUpload(ctx context.Context, bucket string, object string, uploadID string, uploadedParts []minio.CompletePart, opts minio.ObjectOptions) (oi minio.ObjectInfo, e error) {
+	logger.Infof("%s: enter: bucket=%s, object=%s, uploadID=%s", internal.GetCurrentFuncName(), bucket, object, uploadID)
+
+	// 1. Get multipart upload info
+	objInfo, err := x.Mdsclient.GetMultipartUploadInfo(uploadID)
+	if err != nil {
+		logger.Errorf("CompleteMultipartUpload: failed to get multipart upload info for uploadID %s: %v", uploadID, err)
+		if err == redis.Nil {
+			return oi, minio.InvalidUploadID{UploadID: uploadID}
+		}
+		return oi, err
+	}
+
+	// 2. Get all stored parts info and manifests for this upload
+	storedPartsInfo, storedPartsManifest, err := x.Mdsclient.ListMultipartParts(uploadID)
+	if err != nil {
+		logger.Errorf("CompleteMultipartUpload: failed to list parts for uploadID %s: %v", uploadID, err)
+		return oi, err
+	}
+
+	// 3. Verify client-provided parts and assemble final manifest
+	var finalManifest []ChunkInManifest
+	var totalSize int64
+	var partETagBytes [][]byte
+
+	if len(uploadedParts) > 10000 {
+		return oi, fmt.Errorf("too many parts=%d uploaded, it is greater than 10000", len(uploadedParts))
+	}
+
+	for _, clientPart := range uploadedParts {
+		partIDStr := strconv.Itoa(clientPart.PartNumber)
+
+		storedPart, ok := storedPartsInfo[partIDStr]
+		if !ok {
+			logger.Errorf("CompleteMultipartUpload: part %d not found for uploadID %s", clientPart.PartNumber, uploadID)
+			return oi, minio.InvalidPart{}
+		}
+
+		if storedPart.ETag != clientPart.ETag {
+			logger.Errorf("CompleteMultipartUpload: ETag mismatch for part %d. Client: %s, Stored: %s", clientPart.PartNumber, clientPart.ETag, storedPart.ETag)
+			return oi, minio.InvalidPart{}
+		}
+
+		partManifest, ok := storedPartsManifest[partIDStr]
+		if !ok {
+			logger.Errorf("CompleteMultipartUpload: manifest for part %d not found. Data inconsistency for uploadID %s.", clientPart.PartNumber, uploadID)
+			return oi, fmt.Errorf("Internal Error: Part manifest(partIDStr=%s) of %s/%s missing.", partIDStr, bucket, object) //minio.NewGoError("Internal Error: Part manifest missing.", "InternalError", http.StatusInternalServerError)
+		}
+
+		finalManifest = append(finalManifest, partManifest...)
+		totalSize += storedPart.Size
+
+		etag, err := hex.DecodeString(strings.Trim(clientPart.ETag, `"`))
+		if err != nil {
+			logger.Errorf("CompleteMultipartUpload: could not decode etag for part %d: %v", clientPart.PartNumber, err)
+			return oi, minio.InvalidPart{}
+		}
+		partETagBytes = append(partETagBytes, etag)
+	}
+
+	finalETag := computeCompleteMultipartUploadETag(partETagBytes)
+
+	objInfo.Size = totalSize
+	objInfo.ETag = finalETag
+	objInfo.ModTime = time.Now().UTC()
+
+	ns, _, err := ParseNamespaceAndBucket(bucket)
+	if err != nil {
+		return oi, err
+	}
+
+	if err = x.Mdsclient.PutObjectMeta(objInfo, finalManifest); err != nil {
+		logger.Errorf("CompleteMultipartUpload: failed to commit final metadata for %s/%s: %v", bucket, object, err)
+		return oi, err
+	}
+
+	if err = x.Mdsclient.InsertFPsBatch(ns, finalManifest); err != nil {
+		logger.Errorf("CompleteMultipartUpload: failed to insert final fingerprints for %s/%s: %v", bucket, object, err)
+		return oi, err
+	}
+
+	if err = x.Mdsclient.CleanupMultipartUpload(uploadID); err != nil {
+		logger.Warnf("CompleteMultipartUpload: failed to cleanup temporary data for uploadID %s: %v", uploadID, err)
+	}
+
+	logger.Infof("Successfully completed multipart upload for %s/%s, size: %d, ETag: %s", bucket, object, totalSize, finalETag)
+	return objInfo, nil
+}
+
+func (x *XlatorDedup) GetMultipartInfo(ctx context.Context, bucket, object, uploadID string, opts minio.ObjectOptions) (minio.MultipartInfo, error) {
+	logger.Infof("%s: enter: bucket=%s, object=%s, uploadID=%s", internal.GetCurrentFuncName(), bucket, object, uploadID)
+
+	objInfo, err := x.Mdsclient.GetMultipartUploadInfo(uploadID)
+	if err != nil {
+		if err == redis.Nil {
+			return minio.MultipartInfo{}, minio.InvalidUploadID{UploadID: uploadID}
+		}
+		logger.Errorf("GetMultipartInfo: failed to get multipart upload info for uploadID %s: %v", uploadID, err)
+		return minio.MultipartInfo{}, err
+	}
+
+	// Verify that the request parameters match the initiated upload
+	if objInfo.Bucket != bucket || objInfo.Name != object {
+		logger.Errorf("GetMultipartInfo: request parameters mismatch. Expected %s/%s, got %s/%s", objInfo.Bucket, objInfo.Name, bucket, object)
+		return minio.MultipartInfo{}, minio.InvalidUploadID{UploadID: uploadID}
+	}
+
+	result := minio.MultipartInfo{
+		Bucket:      objInfo.Bucket,
+		Object:      objInfo.Name,
+		UploadID:    uploadID,
+		UserDefined: objInfo.UserDefined,
+		Initiated:   objInfo.ModTime,
+	}
+
+	return result, nil
 }
 
 // TODO: add real clock

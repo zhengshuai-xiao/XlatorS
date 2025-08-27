@@ -230,22 +230,62 @@ func (x *XlatorDedup) writeObj(ctx context.Context, ns string, r *minio.PutObjRe
 	return manifestList, nil
 }
 
-func (x *XlatorDedup) readDataFromObject(writer io.Writer, chunk ChunkInManifest, dobjReader *DObjReader) (err error) {
-	//read data from object
-	fpinDObj := dobjReader.fpmap[string(chunk.FP[:])]
-	logger.Tracef("readDataFromObject: fpinDObj: %+v", fpinDObj)
-	_, err = dobjReader.filer.Seek(int64(fpinDObj.Offset), 0)
-	if err != nil {
-		logger.Errorf("readDataFromObject: failed to seek file err: %s", err)
-		return
+func (x *XlatorDedup) writePart(ctx context.Context, ns string, r *minio.PutObjReader) (totalSize int64, manifestList []ChunkInManifest, err error) {
+	var totalWriteSize int64 = 0
+	start := time.Now()
+	//TODO:
+	cdc := FixedCDC{Chunksize: 128 * 1024}
+	var buf = buffPool.Get().(*[]byte)
+	defer buffPool.Put(buf)
+	dobj := &DObj{bucket: GetBackendBucketName(ns), dobj_key: "", path: "", dob_offset: 0, filer: nil}
+	for {
+		var n int
+		n, err = io.ReadFull(r, *buf)
+		if n == 0 {
+			if err == io.EOF {
+				err = nil
+			}
+			break
+		}
+		totalSize += int64(n)
+		//chunk
+		chunks, chunkErr := cdc.Chunking((*buf)[:n])
+		if chunkErr != nil {
+			logger.Errorf("writePart: failed to chunk data: %s", chunkErr)
+			return 0, nil, chunkErr
+		}
+		//calc fp
+		CalcFPs((*buf)[:n], chunks)
+		//search fp
+		if dedupErr := x.Mdsclient.DedupFPsBatch(ns, chunks); dedupErr != nil {
+			logger.Errorf("writePart: failed to deduplicate chunks: %s", dedupErr)
+			return 0, nil, dedupErr
+		}
+		//write data
+		written, writeErr := x.writeDObj(ctx, dobj, (*buf)[:n], chunks)
+		if writeErr != nil {
+			logger.Errorf("writePart: failed to writeDObj: %s", writeErr)
+			return 0, nil, writeErr
+		}
+		totalWriteSize += int64(written)
+		//append to manifest
+		for _, chunk := range chunks {
+			manifestList = append(manifestList, ChunkInManifest{
+				FP:   chunk.FP,
+				Len:  chunk.Len,
+				DOid: chunk.DOid,
+			})
+		}
 	}
-	_, err = io.CopyN(writer, dobjReader.filer, int64(fpinDObj.Len))
-	if err != nil {
-		logger.Errorf("readDataFromObject: failed to copy file err: %s", err)
-		return
+	if err = x.truncateDObj(ctx, dobj); err != nil {
+		logger.Errorf("writePart: failed to truncateDObj: %s", err)
+		return 0, nil, err
 	}
-	return
+	dedupRate := float64(totalSize-totalWriteSize) / float64(totalSize)
+	logger.Infof("writePart: wroteSize/totalSize %d/%d bytes, dedupRate: %.2f%%, elapsed: %s", totalWriteSize, totalSize, dedupRate*100, time.Since(start))
+	return totalSize, manifestList, nil
 }
+
 func (x *XlatorDedup) parseDataObject(dobjReader *DObjReader) (err error) {
 	// parse the file
 	var fpOffsetStr [8]byte
@@ -343,24 +383,99 @@ func (x *XlatorDedup) getDataObject(bucket, object string, o minio.ObjectOptions
 	return dobjReader, nil
 }
 func (x *XlatorDedup) readDataObject(backendBucket string, chunks []ChunkInManifest, startOffset, length int64, writer io.Writer, o minio.ObjectOptions) (err error) {
-	//parse chunks
-	logger.Tracef("readDataObject enter:%d", len(chunks))
+	logger.Tracef("readDataObject enter: startOffset=%d, length=%d, totalChunks=%d", startOffset, length, len(chunks))
+
+	var totalBytesWritten int64
+	var currentObjectOffset int64
+
+	// A map to cache DObjReaders to avoid re-opening and re-parsing the same data object file.
+	dobjReaderCache := make(map[uint64]DObjReader)
+	defer func() {
+		for _, reader := range dobjReaderCache {
+			if reader.filer != nil {
+				reader.filer.Close()
+			}
+		}
+	}()
+
 	for _, chunk := range chunks {
-		//download and read data object
-		var dobjReader DObjReader
-		dobjReader, err = x.getDataObject(backendBucket, x.Mdsclient.GetDObjNameInMDS(chunk.DOid), o)
-		if err != nil {
-			logger.Errorf("readDataObject: failed to get data object[%d] err: %s", chunk.DOid, err)
-			return
+		chunkLen := int64(chunk.Len)
+
+		// If the current chunk is completely before the startOffset, skip it.
+		if currentObjectOffset+chunkLen <= startOffset {
+			currentObjectOffset += chunkLen
+			continue
 		}
-		//read data from object
-		err = x.readDataFromObject(writer, chunk, &dobjReader)
-		if err != nil {
-			logger.Errorf("readDataObject: failed to read data from object[%d] err: %s", chunk.DOid, err)
-			return
+
+		// If we have already written the required length, we can stop.
+		if length != -1 && totalBytesWritten >= length {
+			break
 		}
+
+		// Get or create the DObjReader for the current chunk's data object.
+		dobjReader, ok := dobjReaderCache[chunk.DOid]
+		if !ok {
+			var newReader DObjReader
+			newReader, err = x.getDataObject(backendBucket, x.Mdsclient.GetDObjNameInMDS(chunk.DOid), o)
+			if err != nil {
+				logger.Errorf("readDataObject: failed to get data object[%d]: %v", chunk.DOid, err)
+				return err
+			}
+			dobjReader = newReader // assign to the loop-scoped variable
+			dobjReaderCache[chunk.DOid] = dobjReader
+		}
+
+		// Find the chunk's info within the data object.
+		fpinDObj, fpOk := dobjReader.fpmap[string(chunk.FP[:])]
+		if !fpOk {
+			err = fmt.Errorf("readDataObject: fingerprint not found in data object %d", chunk.DOid)
+			logger.Error(err)
+			return err
+		}
+
+		// Calculate how much to read from this chunk.
+		offsetInChunk := int64(0)
+		if startOffset > currentObjectOffset {
+			offsetInChunk = startOffset - currentObjectOffset
+		}
+
+		bytesToReadInChunk := chunkLen - offsetInChunk
+		if length != -1 {
+			remainingLength := length - totalBytesWritten
+			if bytesToReadInChunk > remainingLength {
+				bytesToReadInChunk = remainingLength
+			}
+		}
+
+		if bytesToReadInChunk <= 0 {
+			continue
+		}
+
+		// Seek to the correct position in the data object file.
+		seekPos := int64(fpinDObj.Offset) + offsetInChunk
+		_, err = dobjReader.filer.Seek(seekPos, io.SeekStart)
+		if err != nil {
+			logger.Errorf("readDataObject: failed to seek in file %s: %v", dobjReader.path, err)
+			return err
+		}
+
+		// Copy the required number of bytes from the data object file to the writer.
+		n, err := io.CopyN(writer, dobjReader.filer, bytesToReadInChunk)
+		if err != nil {
+			logger.Errorf("readDataObject: failed to copy from file %s: %v", dobjReader.path, err)
+			return err
+		}
+
+		totalBytesWritten += n
+		currentObjectOffset += chunkLen
 	}
-	return
+
+	if length != -1 && totalBytesWritten < length {
+		logger.Tracef("readDataObject: wrote %d bytes, which is less than requested length %d. This is normal if range exceeds object size.", totalBytesWritten, length)
+	}
+
+	logger.Tracef("readDataObject end: totalBytesWritten=%d", totalBytesWritten)
+	return nil
 }
 
 func (x *XlatorDedup) readObject(ctx context.Context, bucket, object string, startOffset, length int64, writer io.Writer, etag string, opts minio.ObjectOptions) (err error) {

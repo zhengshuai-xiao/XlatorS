@@ -12,6 +12,10 @@ import (
 	"github.com/minio/minio-go/v7/pkg/credentials"
 )
 
+const (
+	G = 1 * 1024 * 1024 * 1024
+)
+
 // MinIOConfig holds configuration parameters for MinIO connection
 type MinIOConfig struct {
 	Endpoint        string
@@ -49,7 +53,7 @@ func ensureBucket(ctx context.Context, client *minio.Client, bucketName string) 
 }
 
 // uploadLocalFile uploads a local file to MinIO
-func uploadLocalFile(ctx context.Context, client *minio.Client, bucketName, objectName, localFilePath string) (minio.UploadInfo, error) {
+func uploadLocalFile(ctx context.Context, client *minio.Client, bucketName, objectName, localFilePath string, disableMultipart bool, partSize uint64) (minio.UploadInfo, error) {
 	// Get local file information
 	fileInfo, err := os.Stat(localFilePath)
 	if err != nil {
@@ -66,8 +70,8 @@ func uploadLocalFile(ctx context.Context, client *minio.Client, bucketName, obje
 	// Set upload options
 	opts := minio.PutObjectOptions{
 		ContentType:      "application/octet-stream",
-		PartSize:         1 * 1024 * 1024 * 1024, // 1G
-		DisableMultipart: true,
+		PartSize:         partSize,
+		DisableMultipart: disableMultipart,
 	}
 
 	// Upload file
@@ -95,6 +99,8 @@ func main() {
 	bucketName := flag.String("bucket", "", "Target bucket name (required)")
 	localFile := flag.String("local-file", "", "Path to local file to upload (required)")
 	objectName := flag.String("object-name", "", "Name for the object in MinIO (optional, uses local filename if empty)")
+	disableMultipart := flag.Bool("disable-multipart", false, "Disable multipart upload")
+	partSize := flag.Uint64("partSize", G, "Disable multipart upload")
 
 	// Parse command line flags
 	flag.Parse()
@@ -139,7 +145,7 @@ func main() {
 	}
 
 	// Upload file
-	uploadInfo, err := uploadLocalFile(ctx, client, *bucketName, *objectName, *localFile)
+	uploadInfo, err := uploadLocalFile(ctx, client, *bucketName, *objectName, *localFile, *disableMultipart, *partSize)
 	if err != nil {
 		fmt.Printf("File upload failed: %v\n", err)
 		os.Exit(1)

@@ -30,6 +30,11 @@ type MDS interface {
 	GetDOIDFromDObjName(string) (int64, error)
 	GetIncreasedManifestID() (string, error)
 	WriteManifest(manifestid string, manifestList []ChunkInManifest) error
+	InitMultipartUpload(uploadID string, objInfo minio.ObjectInfo) error
+	GetMultipartUploadInfo(uploadID string) (minio.ObjectInfo, error)
+	AddMultipartPart(uploadID string, partID int, partInfo minio.PartInfo, manifestList []ChunkInManifest) error
+	ListMultipartParts(uploadID string) (map[string]minio.PartInfo, map[string][]ChunkInManifest, error)
+	CleanupMultipartUpload(uploadID string) error
 	GetManifest(manifestid string) (chunks []ChunkInManifest, err error)
 	GetObjectManifest(bucket, object string) (chunks []ChunkInManifest, err error)
 	DedupFPs(namespace string, chunks []Chunk) error
