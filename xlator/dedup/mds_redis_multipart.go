@@ -53,7 +53,7 @@ func (m *MDSRedis) GetMultipartUploadInfo(uploadID string) (objInfo minio.Object
 		return err
 	}
 */
-func (m *MDSRedis) AddMultipartPart(uploadID string, partID int, partInfo minio.PartInfo, manifestList []ChunkInManifest) error {
+func (m *MDSRedis) AddMultipartPart(uploadID string, partID int, partInfo PartInfoWithStats, manifestList []ChunkInManifest) error {
 	ctx := context.Background()
 
 	partIDStr := strconv.Itoa(partID)
@@ -91,23 +91,23 @@ func (m *MDSRedis) AddMultipartPart(uploadID string, partID int, partInfo minio.
 
 // ListMultipartParts retrieves all part information and their corresponding manifests for a given uploadID.
 // It first reads the central hash containing all part infos, then for each part, it fetches the manifest from its dedicated list.
-func (m *MDSRedis) ListMultipartParts(uploadID string) (map[string]minio.PartInfo, map[string][]ChunkInManifest, error) {
+func (m *MDSRedis) ListMultipartParts(uploadID string) (map[string]PartInfoWithStats, map[string][]ChunkInManifest, error) {
 	ctx := context.Background()
 
 	partInfoKey := MultipartPartInfoPrefix + uploadID
 	partInfoMapStr, err := m.Rdb.HGetAll(ctx, partInfoKey).Result()
 	if err != nil {
 		if err == redis.Nil { // If the hash doesn't exist, it's not an error, just no parts.
-			return make(map[string]minio.PartInfo), make(map[string][]ChunkInManifest), nil
+			return make(map[string]PartInfoWithStats), make(map[string][]ChunkInManifest), nil
 		}
 		return nil, nil, fmt.Errorf("failed to get all part infos for upload %s: %w", uploadID, err)
 	}
 
-	infoMap := make(map[string]minio.PartInfo, len(partInfoMapStr))
+	infoMap := make(map[string]PartInfoWithStats, len(partInfoMapStr))
 	manifestMap := make(map[string][]ChunkInManifest, len(partInfoMapStr))
 
 	for partIDStr, partInfoJSON := range partInfoMapStr {
-		var pi minio.PartInfo
+		var pi PartInfoWithStats
 		if err := json.Unmarshal([]byte(partInfoJSON), &pi); err != nil {
 			return nil, nil, fmt.Errorf("failed to unmarshal part info for part %s: %w", partIDStr, err)
 		}

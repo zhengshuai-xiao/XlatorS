@@ -122,10 +122,22 @@ func (x *XlatorDedup) writeDObj(ctx context.Context, dobj *DObj, buf []byte, chu
 		}
 	}
 
+	// A short-lived cache to handle duplicates within this single batch of chunks.
+	// This prevents writing the same chunk multiple times into the same DObj.
+	batchFPCache := make(map[string]uint64)
+
 	for i, _ := range chunks {
 		if chunks[i].Deduped {
 			continue
 		}
+
+		// Check for duplicates within this batch.
+		if doid, ok := batchFPCache[chunks[i].FP]; ok {
+			chunks[i].DOid = doid
+			logger.Tracef("writeDObj: intra-batch FP cache hit for fp: %s", internal.StringToHex(chunks[i].FP))
+			continue // Skip writing this chunk as it's a duplicate within the same batch.
+		}
+
 		if dobj.dob_offset+uint64(chunks[i].Len) >= maxSize {
 			err = x.truncateDObj(ctx, dobj)
 			if err != nil {
@@ -150,6 +162,9 @@ func (x *XlatorDedup) writeDObj(ctx context.Context, dobj *DObj, buf []byte, chu
 		chunks[i].DOid = uint64(doid)
 		//chunks[i].OffInDOid = dobj.dob_offset
 		//chunks[i].LenInDOid = chunks[i].Len
+
+		// Cache the FP and its newly assigned DOid for this batch.
+		batchFPCache[chunks[i].FP] = chunks[i].DOid
 		fp := fpinDObj{
 			Offset: dobj.dob_offset,
 			Len:    chunks[i].Len,
@@ -163,7 +178,7 @@ func (x *XlatorDedup) writeDObj(ctx context.Context, dobj *DObj, buf []byte, chu
 	return writenLen, err
 }
 
-func (x *XlatorDedup) writeObj(ctx context.Context, ns string, r *minio.PutObjReader, objInfo *minio.ObjectInfo) (manifestList []ChunkInManifest, err error) {
+func (x *XlatorDedup) writeObj(ctx context.Context, ns string, r *minio.PutObjReader, objInfo *minio.ObjectInfo, localFPCache map[string]uint64) (manifestList []ChunkInManifest, err error) {
 	var totalSize int64 = 0
 	var totalWriteSize int64 = 0
 	start := time.Now()
@@ -172,6 +187,8 @@ func (x *XlatorDedup) writeObj(ctx context.Context, ns string, r *minio.PutObjRe
 	var buf = buffPool.Get().(*[]byte)
 	defer buffPool.Put(buf)
 	dobj := &DObj{bucket: GetBackendBucketName(ns), dobj_key: "", path: "", dob_offset: 0, filer: nil}
+
+	// The localFPCache is passed in from the PutObject session to enable intra-object deduplication.
 	for {
 		var n int
 		n, err = io.ReadFull(r, *buf)
@@ -191,11 +208,39 @@ func (x *XlatorDedup) writeObj(ctx context.Context, ns string, r *minio.PutObjRe
 		//calc fp
 		CalcFPs((*buf)[:n], chunks)
 		//search fp
-		err = x.Mdsclient.DedupFPsBatch(ns, chunks)
-		if err != nil {
-			logger.Errorf("writeObj: failed to deduplicate chunks: %s", err)
-			return nil, err
+		// 1. Check local cache first, then Redis for remaining chunks.
+		chunksToBatch := make([]Chunk, 0, len(chunks))
+		chunkPtrsToUpdate := make(map[int]*Chunk)
+
+		for i := range chunks {
+			if doid, ok := localFPCache[chunks[i].FP]; ok {
+				chunks[i].Deduped = true
+				chunks[i].DOid = doid
+				logger.Tracef("writeObj: local FP cache hit for fp: %s", internal.StringToHex(chunks[i].FP))
+			} else {
+				chunksToBatch = append(chunksToBatch, chunks[i])
+				chunkPtrsToUpdate[len(chunksToBatch)-1] = &chunks[i]
+			}
 		}
+
+		if len(chunksToBatch) > 0 {
+			if err = x.Mdsclient.DedupFPsBatch(ns, chunksToBatch); err != nil {
+				logger.Errorf("writeObj: failed to deduplicate chunks with Redis: %s", err)
+				return nil, err
+			}
+
+			// Update original chunks from Redis result and populate local cache with hits.
+			for i, resultChunk := range chunksToBatch {
+				originalChunkPtr := chunkPtrsToUpdate[i]
+				originalChunkPtr.Deduped = resultChunk.Deduped
+				originalChunkPtr.DOid = resultChunk.DOid
+
+				if resultChunk.Deduped {
+					localFPCache[resultChunk.FP] = resultChunk.DOid
+				}
+			}
+		}
+
 		//write data
 		n, err = x.writeDObj(ctx, dobj, (*buf)[:n], chunks)
 		if err != nil {
@@ -203,6 +248,16 @@ func (x *XlatorDedup) writeObj(ctx context.Context, ns string, r *minio.PutObjRe
 			break
 		}
 		totalWriteSize += int64(n)
+
+		// 2. Update local cache with newly written chunks for intra-object dedup.
+		for i := range chunks {
+			// If a chunk was not deduped by local cache or Redis, it was written by writeDObj.
+			// Now it has a DOid, so we add it to the local cache for subsequent chunks in this object.
+			if !chunks[i].Deduped {
+				localFPCache[chunks[i].FP] = chunks[i].DOid
+			}
+		}
+
 		//append to manifest
 		for _, chunk := range chunks {
 			manifestList = append(manifestList, ChunkInManifest{
@@ -218,25 +273,29 @@ func (x *XlatorDedup) writeObj(ctx context.Context, ns string, r *minio.PutObjRe
 		return
 	}
 	objInfo.Size = int64(totalSize)
-	dedupRate := float64(totalSize-totalWriteSize) / float64(totalSize)
-	objInfo.UserDefined["wroteSize"] = fmt.Sprintf("%d", totalWriteSize)
-	objInfo.UserDefined["dedupRate"] = fmt.Sprintf("%.2f%%", dedupRate*100)
-	logger.Infof("writeDObj: wroteSize/totalSize %d/%d bytes, dedupRate: %s", totalWriteSize, totalSize, objInfo.UserDefined["dedupRate"])
-
-	elapsed := time.Since(start)
-	logger.Infof("writeDObj: elapsed time %s", elapsed)
+	if totalSize > 0 {
+		dedupRate := float64(totalSize-totalWriteSize) / float64(totalSize)
+		objInfo.UserDefined["wroteSize"] = fmt.Sprintf("%d", totalWriteSize)
+		objInfo.UserDefined["dedupRate"] = fmt.Sprintf("%.2f%%", dedupRate*100)
+	} else {
+		objInfo.UserDefined["wroteSize"] = "0"
+		objInfo.UserDefined["dedupRate"] = "0.00%"
+	}
+	logger.Infof("writeObj: processed size: %d, wrote: %s, dedupRate: %s, elapsed: %s",
+		totalSize, totalWriteSize, objInfo.UserDefined["dedupRate"], time.Since(start))
 
 	return manifestList, nil
 }
 
-func (x *XlatorDedup) writePart(ctx context.Context, ns string, r *minio.PutObjReader) (totalSize int64, manifestList []ChunkInManifest, err error) {
-	var totalWriteSize int64 = 0
+func (x *XlatorDedup) writePart(ctx context.Context, ns string, r *minio.PutObjReader, localFPCache map[string]uint64) (totalSize int64, totalWriteSize int64, manifestList []ChunkInManifest, err error) {
+	totalWriteSize = 0
 	start := time.Now()
 	//TODO:
 	cdc := FixedCDC{Chunksize: 128 * 1024}
 	var buf = buffPool.Get().(*[]byte)
 	defer buffPool.Put(buf)
 	dobj := &DObj{bucket: GetBackendBucketName(ns), dobj_key: "", path: "", dob_offset: 0, filer: nil}
+	// The localFPCache is passed in from the multipart upload session to enable intra-object deduplication across all parts.
 	for {
 		var n int
 		n, err = io.ReadFull(r, *buf)
@@ -251,22 +310,61 @@ func (x *XlatorDedup) writePart(ctx context.Context, ns string, r *minio.PutObjR
 		chunks, chunkErr := cdc.Chunking((*buf)[:n])
 		if chunkErr != nil {
 			logger.Errorf("writePart: failed to chunk data: %s", chunkErr)
-			return 0, nil, chunkErr
+			return 0, 0, nil, chunkErr
 		}
 		//calc fp
 		CalcFPs((*buf)[:n], chunks)
 		//search fp
-		if dedupErr := x.Mdsclient.DedupFPsBatch(ns, chunks); dedupErr != nil {
-			logger.Errorf("writePart: failed to deduplicate chunks: %s", dedupErr)
-			return 0, nil, dedupErr
+		// 1. Check local cache first, then Redis for remaining chunks.
+		chunksToBatch := make([]Chunk, 0, len(chunks))
+		chunkPtrsToUpdate := make(map[int]*Chunk)
+
+		for i := range chunks {
+			if doid, ok := localFPCache[chunks[i].FP]; ok {
+				chunks[i].Deduped = true
+				chunks[i].DOid = doid
+				logger.Tracef("writePart: local FP cache hit for fp: %s", internal.StringToHex(chunks[i].FP))
+			} else {
+				chunksToBatch = append(chunksToBatch, chunks[i])
+				chunkPtrsToUpdate[len(chunksToBatch)-1] = &chunks[i]
+			}
 		}
+
+		if len(chunksToBatch) > 0 {
+			if dedupErr := x.Mdsclient.DedupFPsBatch(ns, chunksToBatch); dedupErr != nil {
+				logger.Errorf("writePart: failed to deduplicate chunks with Redis: %s", dedupErr)
+				return 0, 0, nil, dedupErr
+			}
+
+			// Update original chunks from Redis result and populate local cache with hits.
+			for i, resultChunk := range chunksToBatch {
+				originalChunkPtr := chunkPtrsToUpdate[i]
+				originalChunkPtr.Deduped = resultChunk.Deduped
+				originalChunkPtr.DOid = resultChunk.DOid
+
+				if resultChunk.Deduped {
+					localFPCache[resultChunk.FP] = resultChunk.DOid
+				}
+			}
+		}
+
 		//write data
 		written, writeErr := x.writeDObj(ctx, dobj, (*buf)[:n], chunks)
 		if writeErr != nil {
 			logger.Errorf("writePart: failed to writeDObj: %s", writeErr)
-			return 0, nil, writeErr
+			return 0, 0, nil, writeErr
 		}
 		totalWriteSize += int64(written)
+
+		// 2. Update local cache with newly written chunks for intra-part dedup.
+		for i := range chunks {
+			// If a chunk was not deduped by local cache or Redis, it was written by writeDObj.
+			// Now it has a DOid, so we add it to the local cache for subsequent chunks in this part.
+			if !chunks[i].Deduped {
+				localFPCache[chunks[i].FP] = chunks[i].DOid
+			}
+		}
+
 		//append to manifest
 		for _, chunk := range chunks {
 			manifestList = append(manifestList, ChunkInManifest{
@@ -278,11 +376,15 @@ func (x *XlatorDedup) writePart(ctx context.Context, ns string, r *minio.PutObjR
 	}
 	if err = x.truncateDObj(ctx, dobj); err != nil {
 		logger.Errorf("writePart: failed to truncateDObj: %s", err)
-		return 0, nil, err
+		return 0, 0, nil, err
 	}
-	dedupRate := float64(totalSize-totalWriteSize) / float64(totalSize)
-	logger.Infof("writePart: wroteSize/totalSize %d/%d bytes, dedupRate: %.2f%%, elapsed: %s", totalWriteSize, totalSize, dedupRate*100, time.Since(start))
-	return totalSize, manifestList, nil
+	var dedupRate float64
+	if totalSize > 0 {
+		dedupRate = float64(totalSize-totalWriteSize) / float64(totalSize)
+	}
+	logger.Infof("writePart: wroteSize/totalSize %d/%d bytes, dedupRate: %.2f%%, elapsed: %s",
+		totalWriteSize, totalSize, dedupRate*100, time.Since(start))
+	return totalSize, totalWriteSize, manifestList, nil
 }
 
 func (x *XlatorDedup) parseDataObject(dobjReader *DObjReader) (err error) {

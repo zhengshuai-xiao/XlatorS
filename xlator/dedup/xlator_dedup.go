@@ -48,13 +48,15 @@ const (
 
 type XlatorDedup struct {
 	minio.GatewayUnsupported
-	Client        *miniogo.Core
-	HTTPClient    *http.Client
-	Metrics       *minio.BackendMetrics
-	Mdsclient     MDS
-	dobjCachePath string         // The local directory used to cache data objects.
-	stopGC        chan struct{}  // Channel to signal GC stop
-	wg            sync.WaitGroup // WaitGroup for graceful shutdown
+	Client               *miniogo.Core
+	HTTPClient           *http.Client
+	Metrics              *minio.BackendMetrics
+	Mdsclient            MDS
+	dobjCachePath        string                       // The local directory used to cache data objects.
+	stopGC               chan struct{}                // Channel to signal GC stop
+	wg                   sync.WaitGroup               // WaitGroup for graceful shutdown
+	multiPartFPCaches    map[string]map[string]uint64 // In-memory FP cache for active multipart uploads. Key: uploadID
+	multiPartFPCachesMux sync.Mutex                   // Mutex to protect multiPartFPCaches
 }
 
 var logger = internal.GetLogger("XlatorDedup")
@@ -92,10 +94,11 @@ func NewXlatorDedup(gConf *internal.Config) (*XlatorDedup, error) {
 		HTTPClient: &http.Client{
 			Transport: t,
 		},
-		Metrics:       metrics,
-		Mdsclient:     redismeta,
-		dobjCachePath: gConf.DownloadCache,
-		stopGC:        make(chan struct{}),
+		Metrics:           metrics,
+		Mdsclient:         redismeta,
+		dobjCachePath:     gConf.DownloadCache,
+		stopGC:            make(chan struct{}),
+		multiPartFPCaches: make(map[string]map[string]uint64),
 	}
 
 	// Validate the cache path. An empty path would cause silent failure.
@@ -291,7 +294,7 @@ func (x *XlatorDedup) ListBuckets(ctx context.Context) ([]minio.BucketInfo, erro
 }
 
 func (x *XlatorDedup) PutObject(ctx context.Context, bucket string, object string, r *minio.PutObjReader, opts minio.ObjectOptions) (objInfo minio.ObjectInfo, err error) {
-	logger.Infof("%s: enter+++++", internal.GetCurrentFuncName())
+	//logger.Infof("%s: enter+++++", internal.GetCurrentFuncName())
 	start1 := time.Now()
 	if err = ValidateBucketNameFormat(bucket); err != nil {
 		logger.Errorf("invalid bucket name format for %s: %v", bucket, err)
@@ -351,7 +354,7 @@ func (x *XlatorDedup) PutObject(ctx context.Context, bucket string, object strin
 		logger.Errorf("failed to get increased manifest ID: %v", err)
 		return
 	}
-	logger.Trace("PutObject 1")
+	//logger.Trace("PutObject 1")
 	isDir := false
 	if strings.HasSuffix(object, sep) {
 		//TODO: is it meaningful???
@@ -380,9 +383,24 @@ func (x *XlatorDedup) PutObject(ctx context.Context, bucket string, object strin
 		objInfo.UserDefined = make(map[string]string)
 	}
 	objInfo.UserDefined[ManifestIDKey] = manifestID
-	logger.Info("PutObject 2")
+	//logger.Info("PutObject 2")
+
+	// To align with the multipart upload pattern, we manage the FP cache in a central map
+	// for the duration of this single-shot upload operation, using the manifestID as the key.
+	x.multiPartFPCachesMux.Lock()
+	localFPCache := make(map[string]uint64)
+	x.multiPartFPCaches[manifestID] = localFPCache
+	x.multiPartFPCachesMux.Unlock()
+
+	// Ensure the temporary cache is cleaned up when the function returns.
+	defer func() {
+		x.multiPartFPCachesMux.Lock()
+		delete(x.multiPartFPCaches, manifestID)
+		x.multiPartFPCachesMux.Unlock()
+	}()
+
 	var manifestList []ChunkInManifest
-	manifestList, err = x.writeObj(ctx, ns, r, &objInfo)
+	manifestList, err = x.writeObj(ctx, ns, r, &objInfo, localFPCache)
 	if err != nil {
 		logger.Errorf("failed to write data to object %s: %v", object, err)
 		return objInfo, err
@@ -403,9 +421,14 @@ func (x *XlatorDedup) PutObject(ctx context.Context, bucket string, object strin
 		logger.Errorf("failed to insert fingerprints for object %s: %v", object, err)
 		return objInfo, err
 	}
+
 	elapsed := time.Since(start1)
-	logger.Infof("PutObject(%s) took %vs, throughPut: %.2f MB/s", object, elapsed.Seconds(), float64(objInfo.Size)/(1024*1024)/elapsed.Seconds())
-	logger.Infof("%s: end-----", internal.GetCurrentFuncName())
+	throughput := 0.0
+	if elapsed.Seconds() > 0 {
+		throughput = float64(objInfo.Size) / (1024 * 1024) / elapsed.Seconds()
+	}
+	logger.Infof("Successfully put object %s/%s, size: %d, wrote: %s, dedupRate: %s, ETag: %s, elapsed: %s, throughput: %.2f MB/s",
+		bucket, object, objInfo.Size, objInfo.UserDefined["wroteSize"], objInfo.UserDefined["dedupRate"], objInfo.ETag, elapsed, throughput)
 	return objInfo, nil
 }
 
@@ -447,6 +470,11 @@ func (x *XlatorDedup) NewMultipartUpload(ctx context.Context, bucket string, obj
 		logger.Errorf("failed to get a unique ID for multipart upload: %v", err)
 		return "", err
 	}
+
+	// Create a per-upload FP cache for intra-object deduplication across parts.
+	x.multiPartFPCachesMux.Lock()
+	x.multiPartFPCaches[uploadID] = make(map[string]uint64)
+	x.multiPartFPCachesMux.Unlock()
 
 	// Create a temporary ObjectInfo to hold the state of the multipart upload.
 	// This is similar to how PutObject prepares an ObjectInfo.
@@ -501,29 +529,43 @@ func (x *XlatorDedup) PutObjectPart(ctx context.Context, bucket string, object s
 		return pi, err
 	}
 
+	// Retrieve the dedicated FP cache for this multipart upload.
+	x.multiPartFPCachesMux.Lock()
+	localFPCache, ok := x.multiPartFPCaches[uploadID]
+	x.multiPartFPCachesMux.Unlock()
+	if !ok {
+		// This can happen if the server restarts. The upload is still valid in Redis, but the in-memory cache is gone.
+		// For now, we treat this as an error to enforce consistency. A more robust solution might re-create the cache.
+		logger.Errorf("PutObjectPart: FP cache for uploadID %s not found. The upload might be stale or the server restarted.", uploadID)
+		return pi, minio.InvalidUploadID{UploadID: uploadID}
+	}
+
 	// 2. Process data stream: chunk, dedup, and write new data chunks
-	partSize, manifestList, err := x.writePart(ctx, ns, r)
+	partSize, writtenSize, manifestList, err := x.writePart(ctx, ns, r, localFPCache)
 	if err != nil {
 		logger.Errorf("PutObjectPart: failed to process part data for uploadID %s, partID %d: %v", uploadID, partID, err)
 		return pi, err
 	}
 
 	// 3. Store part metadata and manifest
-	partInfo := minio.PartInfo{
-		PartNumber:   partID,
-		ETag:         r.MD5CurrentHexString(),
-		Size:         partSize,
-		LastModified: time.Now().UTC(),
+	partInfoWithStats := PartInfoWithStats{
+		PartInfo: minio.PartInfo{
+			PartNumber:   partID,
+			ETag:         r.MD5CurrentHexString(),
+			Size:         partSize,
+			LastModified: time.Now().UTC(),
+		},
+		WrittenSize: writtenSize,
 	}
 
-	err = x.Mdsclient.AddMultipartPart(uploadID, partID, partInfo, manifestList)
+	err = x.Mdsclient.AddMultipartPart(uploadID, partID, partInfoWithStats, manifestList)
 	if err != nil {
 		logger.Errorf("PutObjectPart: failed to store part metadata for uploadID %s, partID %d: %v", uploadID, partID, err)
 		return pi, err
 	}
 
 	logger.Infof("Successfully uploaded part %d for %s/%s (uploadID: %s), size: %d", partID, bucket, object, uploadID, partSize)
-	return partInfo, nil
+	return partInfoWithStats.PartInfo, nil
 }
 
 // computeCompleteMultipartUploadETag calculates the ETag for a completed multipart upload.
@@ -564,6 +606,7 @@ func (x *XlatorDedup) CompleteMultipartUpload(ctx context.Context, bucket string
 	// 3. Verify client-provided parts and assemble final manifest
 	var finalManifest []ChunkInManifest
 	var totalSize int64
+	var totalWrittenSize int64
 	var partETagBytes [][]byte
 
 	if len(uploadedParts) > 10000 {
@@ -592,6 +635,7 @@ func (x *XlatorDedup) CompleteMultipartUpload(ctx context.Context, bucket string
 
 		finalManifest = append(finalManifest, partManifest...)
 		totalSize += storedPart.Size
+		totalWrittenSize += storedPart.WrittenSize
 
 		etag, err := hex.DecodeString(strings.Trim(clientPart.ETag, `"`))
 		if err != nil {
@@ -606,6 +650,14 @@ func (x *XlatorDedup) CompleteMultipartUpload(ctx context.Context, bucket string
 	objInfo.Size = totalSize
 	objInfo.ETag = finalETag
 	objInfo.ModTime = time.Now().UTC()
+	if totalSize > 0 {
+		dedupRate := float64(totalSize-totalWrittenSize) / float64(totalSize)
+		objInfo.UserDefined["wroteSize"] = fmt.Sprintf("%d", totalWrittenSize)
+		objInfo.UserDefined["dedupRate"] = fmt.Sprintf("%.2f%%", dedupRate*100)
+	} else {
+		objInfo.UserDefined["wroteSize"] = "0"
+		objInfo.UserDefined["dedupRate"] = "0.00%"
+	}
 
 	ns, _, err := ParseNamespaceAndBucket(bucket)
 	if err != nil {
@@ -622,12 +674,46 @@ func (x *XlatorDedup) CompleteMultipartUpload(ctx context.Context, bucket string
 		return oi, err
 	}
 
+	// Always remove the in-memory FP cache for this upload session.
+	x.multiPartFPCachesMux.Lock()
+	delete(x.multiPartFPCaches, uploadID)
+	x.multiPartFPCachesMux.Unlock()
+
 	if err = x.Mdsclient.CleanupMultipartUpload(uploadID); err != nil {
 		logger.Warnf("CompleteMultipartUpload: failed to cleanup temporary data for uploadID %s: %v", uploadID, err)
 	}
 
-	logger.Infof("Successfully completed multipart upload for %s/%s, size: %d, ETag: %s", bucket, object, totalSize, finalETag)
+	logger.Infof("Successfully completed multipart upload for %s/%s, size: %d, wrote: %d, dedupRate: %s, ETag: %s",
+		bucket, object, totalSize, totalWrittenSize, objInfo.UserDefined["dedupRate"], finalETag)
 	return objInfo, nil
+}
+
+func (x *XlatorDedup) AbortMultipartUpload(ctx context.Context, bucket, object, uploadID string, opts minio.ObjectOptions) error {
+	logger.Infof("%s: enter: bucket=%s, object=%s, uploadID=%s", internal.GetCurrentFuncName(), bucket, object, uploadID)
+
+	// Verify the upload exists before cleaning up.
+	_, err := x.Mdsclient.GetMultipartUploadInfo(uploadID)
+	if err != nil {
+		if err == redis.Nil {
+			return minio.InvalidUploadID{UploadID: uploadID}
+		}
+		logger.Errorf("AbortMultipartUpload: failed to get multipart upload info for uploadID %s: %v", uploadID, err)
+		return err
+	}
+
+	// Clean up metadata from Redis.
+	if err := x.Mdsclient.CleanupMultipartUpload(uploadID); err != nil {
+		logger.Warnf("AbortMultipartUpload: failed to cleanup temporary data for uploadID %s: %v", uploadID, err)
+		// Continue to clean up in-memory cache anyway.
+	}
+
+	// Clean up the in-memory FP cache.
+	x.multiPartFPCachesMux.Lock()
+	delete(x.multiPartFPCaches, uploadID)
+	x.multiPartFPCachesMux.Unlock()
+
+	logger.Infof("Successfully aborted multipart upload for %s/%s with upload ID %s", bucket, object, uploadID)
+	return nil
 }
 
 func (x *XlatorDedup) GetMultipartInfo(ctx context.Context, bucket, object, uploadID string, opts minio.ObjectOptions) (minio.MultipartInfo, error) {

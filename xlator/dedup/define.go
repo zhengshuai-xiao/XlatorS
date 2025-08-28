@@ -1,5 +1,7 @@
 package dedup
 
+import minio "github.com/minio/minio/cmd"
+
 type Chunk struct {
 	FP      string
 	off     uint64
@@ -8,6 +10,11 @@ type Chunk struct {
 	DOid    uint64
 	//OffInDOid uint64
 	//LenInDOid uint64
+}
+
+type PartInfoWithStats struct {
+	minio.PartInfo
+	WrittenSize int64 `json:"writtenSize,omitempty"`
 }
 type ChunkInManifest struct {
 	FP   string
