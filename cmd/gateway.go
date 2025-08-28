@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path"
-	"path/filepath"
 	"strconv"
 
 	mcli "github.com/minio/cli"
@@ -19,9 +18,9 @@ import (
 func cmdGateway() *cli.Command {
 	selfFlags := []cli.Flag{
 		&cli.StringFlag{
-			Name:  "log",
+			Name:  "logdir",
 			Usage: "path for gateway log",
-			Value: path.Join(internal.GetDefaultLogDir(), "xlators-gateway.log"),
+			Value: internal.GetDefaultLogDir(),
 		},
 		&cli.StringFlag{
 			Name:  "loglevel",
@@ -130,18 +129,15 @@ var xobject minio.ObjectLayer
 
 func gateway(c *cli.Context) error {
 	//setup(c, 2)
-	logFile := c.String("log")
-	if logFile != "" {
-
-		if err := os.MkdirAll(filepath.Dir(logFile), 0750); err != nil {
-			logrus.Fatalf("Failed to create log directory: %v", err)
+	var logFile string
+	logDir := c.String("logdir")
+	if logDir != "" {
+		if c.String("xlator") != "" {
+			xlatorLogFile := "xlator" + "-" + c.String("xlator") + ".log"
+			logFile = path.Join(logDir, xlatorLogFile)
 		}
 
-		f, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0660)
-		if err != nil {
-			logrus.Fatalf("Failed to open log file %s: %v", logFile, err)
-		}
-		logrus.SetOutput(f)
+		internal.SetOutFile(logFile)
 	}
 	ak := os.Getenv("MINIO_ROOT_USER")
 	if ak == "" {

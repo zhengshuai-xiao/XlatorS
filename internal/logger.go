@@ -161,8 +161,13 @@ func DisableLogColor() {
 }
 
 func SetOutFile(name string) {
-	file, err := os.OpenFile(name, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+	if err := os.MkdirAll(path.Dir(name), 0750); err != nil {
+		logrus.Fatalf("Failed to create log directory for %s: %v", name, err)
+		return
+	}
+	file, err := os.OpenFile(name, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0660)
 	if err != nil {
+		logrus.Fatalf("Failed to open log file %s: %v", name, err)
 		return
 	}
 	mu.Lock()
