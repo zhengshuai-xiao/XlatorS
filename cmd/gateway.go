@@ -20,7 +20,7 @@ func cmdGateway() *cli.Command {
 		&cli.StringFlag{
 			Name:  "logdir",
 			Usage: "path for gateway log",
-			Value: internal.GetDefaultLogDir(),
+			Value: "",
 		},
 		&cli.StringFlag{
 			Name:  "loglevel",
@@ -139,6 +139,7 @@ func gateway(c *cli.Context) error {
 
 		internal.SetOutFile(logFile)
 	}
+
 	ak := os.Getenv("MINIO_ROOT_USER")
 	if ak == "" {
 		ak = os.Getenv("MINIO_ACCESS_KEY")

@@ -125,4 +125,4 @@ require (
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 )
 
-replace github.com/minio/minio v0.0.0 => ../juicedata-minio
+replace github.com/minio/minio v0.0.0 => github.com/zhengshuai-xiao/juicedata-minio v0.0.0-20250821145156-8b0c931ba41c

@@ -245,7 +245,7 @@ func (x *XlatorDedup) writeObj(ctx context.Context, ns string, r *minio.PutObjRe
 		n, err = x.writeDObj(ctx, dobj, (*buf)[:n], chunks)
 		if err != nil {
 			logger.Errorf("writeObj: failed to writeDObj: %s", err)
-			break
+			return nil, err
 		}
 		totalWriteSize += int64(n)
 

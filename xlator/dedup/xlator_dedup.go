@@ -302,9 +302,12 @@ func (x *XlatorDedup) PutObject(ctx context.Context, bucket string, object strin
 	}
 	exist, err := x.Mdsclient.BucketExist(bucket)
 	if err != nil {
+		logger.Errorf("PutObject: failed to check bucket existence: %v", err)
 		return objInfo, minio.ErrorRespToObjectError(err, bucket)
 	}
 	if !exist {
+		err = fmt.Errorf("internal error: bucket %s not found", bucket)
+		logger.Error(err)
 		err = minio.BucketNotFound{Bucket: bucket}
 		return
 	}

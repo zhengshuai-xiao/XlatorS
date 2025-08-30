@@ -39,6 +39,8 @@ dbuild:
 run:
 	go run main.go
 
+cleancache:
+	go clean -modcache
 clean:
 	rm -f $(xlators) $(upload_file) $(calc_fp) $(gctrigger)
 
