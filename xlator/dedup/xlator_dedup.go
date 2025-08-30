@@ -57,6 +57,9 @@ type XlatorDedup struct {
 	wg                   sync.WaitGroup               // WaitGroup for graceful shutdown
 	multiPartFPCaches    map[string]map[string]uint64 // In-memory FP cache for active multipart uploads. Key: uploadID
 	multiPartFPCachesMux sync.Mutex                   // Mutex to protect multiPartFPCaches
+	fastCDCMinSize       int
+	fastCDCAvgSize       int
+	fastCDCMaxSize       int
 }
 
 var logger = internal.GetLogger("XlatorDedup")
@@ -100,6 +103,26 @@ func NewXlatorDedup(gConf *internal.Config) (*XlatorDedup, error) {
 		stopGC:            make(chan struct{}),
 		multiPartFPCaches: make(map[string]map[string]uint64),
 	}
+
+	// Configure FastCDC parameters from environment variables, with sane defaults.
+	// Example: export XL_DEDUP_FASTCDC_AVG_SIZE=262144
+	var parseEnvInt = func(key string, defaultValue int) int {
+		valStr := os.Getenv(key)
+		if valStr == "" {
+			return defaultValue
+		}
+		val, err := strconv.Atoi(valStr)
+		if err != nil {
+			logger.Warnf("Invalid value for %s: '%s'. Using default %d. Error: %v", key, valStr, defaultValue, err)
+			return defaultValue
+		}
+		logger.Infof("Using custom FastCDC config from env: %s=%d", key, val)
+		return val
+	}
+
+	xlatorDedup.fastCDCMinSize = parseEnvInt("XL_DEDUP_FASTCDC_MIN_SIZE", 64*1024)  // 64KiB
+	xlatorDedup.fastCDCAvgSize = parseEnvInt("XL_DEDUP_FASTCDC_AVG_SIZE", 128*1024) // 128KiB
+	xlatorDedup.fastCDCMaxSize = parseEnvInt("XL_DEDUP_FASTCDC_MAX_SIZE", 256*1024) // 256KiB
 
 	// Validate the cache path. An empty path would cause silent failure.
 	if xlatorDedup.dobjCachePath == "" {
@@ -294,7 +317,7 @@ func (x *XlatorDedup) ListBuckets(ctx context.Context) ([]minio.BucketInfo, erro
 }
 
 func (x *XlatorDedup) PutObject(ctx context.Context, bucket string, object string, r *minio.PutObjReader, opts minio.ObjectOptions) (objInfo minio.ObjectInfo, err error) {
-	//logger.Infof("%s: enter+++++", internal.GetCurrentFuncName())
+	logger.Infof("%s: enter+++++", internal.GetCurrentFuncName())
 	start1 := time.Now()
 	if err = ValidateBucketNameFormat(bucket); err != nil {
 		logger.Errorf("invalid bucket name format for %s: %v", bucket, err)

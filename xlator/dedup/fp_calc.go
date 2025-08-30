@@ -15,8 +15,8 @@ func CalcFP(buf []byte, c *Chunk) {
 	//c.FP = hash.Sum(buf[c.off : c.off+c.len])
 }
 
-func CalcFPs(buf []byte, chunks []Chunk) {
+func CalcFPs(chunks []Chunk) {
 	for i := range chunks {
-		CalcFP(buf[chunks[i].off:chunks[i].off+chunks[i].Len], &chunks[i])
+		CalcFP(chunks[i].Data, &chunks[i])
 	}
 }

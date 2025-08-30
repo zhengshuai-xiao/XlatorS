@@ -3,8 +3,8 @@ package dedup
 import minio "github.com/minio/minio/cmd"
 
 type Chunk struct {
-	FP      string
-	off     uint64
+	FP      string // Fingerprint of the chunk data
+	Data    []byte // Chunk data, valid for the lifetime of the chunk
 	Len     uint64
 	Deduped bool
 	DOid    uint64
