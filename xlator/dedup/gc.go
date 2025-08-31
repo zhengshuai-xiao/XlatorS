@@ -109,12 +109,12 @@ func (x *XlatorDedup) runGC() {
 
 	for _, ns := range namespaces {
 		logger.Infof("GC: processing namespace %s", ns)
-		x.cleanupNamespace(ctx, ns)
+		x.cleanupNamespace(ctx, ns, x.getDataObject)
 	}
 }
 
 // cleanupNamespace processes the deleted DOID queue for a single namespace.
-func (x *XlatorDedup) cleanupNamespace(ctx context.Context, namespace string) {
+func (x *XlatorDedup) cleanupNamespace(ctx context.Context, namespace string, getDataObjectFunc func(bucket, object string, o minio.ObjectOptions) (DObjReader, error)) {
 	backendBucket := GetBackendBucketName(namespace)
 
 	for {
@@ -136,7 +136,7 @@ func (x *XlatorDedup) cleanupNamespace(ctx context.Context, namespace string) {
 			dobjName := x.Mdsclient.GetDObjNameInMDS(doid)
 
 			// 1. Get FPs from data object
-			dobjReader, err := x.getDataObject(backendBucket, dobjName, minio.ObjectOptions{})
+			dobjReader, err := getDataObjectFunc(backendBucket, dobjName, minio.ObjectOptions{})
 			if err != nil {
 				if resp, ok := err.(miniogo.ErrorResponse); ok && resp.Code == "NoSuchKey" {
 					logger.Warnf("GC: data object %s/%s not found in backend. Assuming already deleted.", backendBucket, dobjName)

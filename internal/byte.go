@@ -41,3 +41,11 @@ func DeserializeFromString(data string, out interface{}) (err error) {
 func StringToHex(s string) string {
 	return hex.EncodeToString([]byte(s))
 }
+
+func HexToString(s string) (string, error) {
+	data, err := hex.DecodeString(s)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}

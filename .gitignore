@@ -32,10 +32,6 @@ go.work.sum
 # .vscode/
 
 xlators
-upload_file
-calc_fp
-test
-getObject_aws
-gc_trigger
+xc
 
 test.go

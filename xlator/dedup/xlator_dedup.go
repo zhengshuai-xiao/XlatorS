@@ -141,7 +141,7 @@ func NewXlatorDedup(gConf *internal.Config) (*XlatorDedup, error) {
 	// Validate the cache path. An empty path would cause silent failure.
 	if xlatorDedup.dobjCachePath == "" {
 		err := fmt.Errorf("data object cache path (downloadCache) cannot be empty")
-		logger.Errorf(err.Error())
+		logger.Errorf("%v", err)
 		return nil, err
 	}
 

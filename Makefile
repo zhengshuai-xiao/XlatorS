@@ -1,48 +1,67 @@
-export GO111MODULE=on
+# Go parameters
+GOCMD=go
+GOBUILD=$(GOCMD) build
+GOCLEAN=$(GOCMD) clean
+GOTEST=$(GOCMD) test
+GOMOD=$(GOMOD) tidy
+GORUN=$(GOMOD) run
 
-xlators := xlators
-upload_file := upload_file
-calc_fp:=calc_fp
-getObject_aws:=getObject_aws
-gctrigger := gc_trigger
-
-#REVISION := $(shell git rev-parse --short HEAD 2>/dev/null)
-#REVISIONDATE := $(shell git log -1 --pretty=format:'%cd' --date short 2>/dev/null)
-
+# Project variables
+BINARY_NAME=xlators
+BINARY_DIR=./bin
 LDFLAGS = -s -w
 
-SHELL = /bin/sh
+# Source files
+MAIN_SRC = main.go
+XC_SRC_DIR = xc
 
-ifdef STATIC
-	LDFLAGS += -linkmode external -extldflags '-static'
-	CC = /usr/bin/musl-gcc
-	export CC
-endif
-build:
-	go version
-	@echo "building release"
-	go build -ldflags="$(LDFLAGS)" -o $(xlators) main.go
-	go build -ldflags="$(LDFLAGS)" -o $(upload_file) utils/upload_file.go
-	go build -ldflags="$(LDFLAGS)" -o $(calc_fp) utils/calcFP.go
-	go build -ldflags="$(LDFLAGS)" -o $(getObject_aws) utils/getObject4AWS.go
-	go build -ldflags="$(LDFLAGS)" -o $(gctrigger) utils/gc_trigger.go
-dbuild:
-	go version
-	@echo "building debug"
-	go build -gcflags "all=-N -l"  -o $(xlators) main.go
-	go build -gcflags "all=-N -l"  -o $(upload_file) utils/upload_file.go
-	go build -gcflags "all=-N -l"  -o $(calc_fp) utils/calcFP.go
-	go build -gcflags "all=-N -l"  -o $(gctrigger) utils/gc_trigger.go
-#go build -ldflags="$(LDFLAGS)" -o $(xlators) main.go
-#-gcflags "all=-N -l"
+# Target binaries
+MAIN_BINARY = $(BINARY_DIR)/$(BINARY_NAME)
+XC_BINARY = $(BINARY_DIR)/xc
 
-run:
-	go run main.go
+ALL_BINARIES = $(MAIN_BINARY) $(XC_BINARY)
 
-cleancache:
-	go clean -modcache
-clean:
-	rm -f $(xlators) $(upload_file) $(calc_fp) $(gctrigger)
+# Default target
+all: build
 
-deps:
-	go mod tidy
+# Phony targets are not files
+.PHONY: all build dbuild test run clean cleancache deps help
+
+# Build targets
+build: $(ALL_BINARIES) ## Build all binaries for release
+
+dbuild: ## Build all binaries for debug
+	@echo "--> Building debug binaries..."
+	@mkdir -p $(BINARY_DIR)
+	$(GOBUILD) -gcflags "all=-N -l" -o $(MAIN_BINARY) $(MAIN_SRC)
+	$(GOBUILD) -gcflags "all=-N -l" -o $(XC_BINARY) ./$(XC_SRC_DIR)
+
+$(MAIN_BINARY): $(MAIN_SRC)
+	@echo "--> Building main binary: $(BINARY_NAME)"
+	@mkdir -p $(BINARY_DIR)
+	$(GOBUILD) -ldflags="$(LDFLAGS)" -o $@ $<
+
+$(XC_BINARY): $(wildcard $(XC_SRC_DIR)/*.go)
+	@echo "--> Building utility: xc"
+	@mkdir -p $(BINARY_DIR)
+	$(GOBUILD) -ldflags="$(LDFLAGS)" -o $@ ./$(XC_SRC_DIR)
+
+# Other targets
+test: ## Run unit tests
+	@echo "--> Running unit tests..."
+	$(GOTEST) -v ./...
+
+deps: ## Tidy go modules
+	@echo "--> Tidying go modules..."
+	$(GOMOD) tidy
+
+clean: ## Clean up built binaries and directory
+	@echo "--> Cleaning up..."
+	$(GOCLEAN)
+	rm -rf $(BINARY_DIR)
+
+help: ## Show this help message
+	@echo "Usage: make <target>"
+	@echo ""
+	@echo "Targets:"
+	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
