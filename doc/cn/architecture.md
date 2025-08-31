@@ -16,7 +16,7 @@ Xlator这个概念是在GlusterFS架构中得到启发，我加了个S，它可�
 
 XlatorS 系统如图所示，分为以下几个模块：
 
-![design](./images/XlatorS_design.png "Magic Gardens")
+![design](./images/XlatorS_design.drawio.png "Magic Gardens")
 
 XlatorS 集群:有每个XlatorS组成，前端过来的对象都会经过XlatorS,  数据会由指定的Xlator或Xlator组合来处理（翻译），翻译后的数据就会根据需要存入MetaData Engine 和Data Storage
 
