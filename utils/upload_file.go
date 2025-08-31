@@ -53,7 +53,7 @@ func ensureBucket(ctx context.Context, client *minio.Client, bucketName string) 
 }
 
 // uploadLocalFile uploads a local file to MinIO
-func uploadLocalFile(ctx context.Context, client *minio.Client, bucketName, objectName, localFilePath string, disableMultipart bool, partSize uint64) (minio.UploadInfo, error) {
+func uploadLocalFile(ctx context.Context, client *minio.Client, bucketName, objectName, localFilePath string, disableMultipart bool, partSize uint64, chunkMethod string) (minio.UploadInfo, error) {
 	// Get local file information
 	fileInfo, err := os.Stat(localFilePath)
 	if err != nil {
@@ -72,7 +72,11 @@ func uploadLocalFile(ctx context.Context, client *minio.Client, bucketName, obje
 		ContentType:      "application/octet-stream",
 		PartSize:         partSize,
 		DisableMultipart: disableMultipart,
+		SendContentMd5:   true,
+		UserMetadata:     make(map[string]string),
 	}
+	//to backend this field will convert to X-Amz-Meta-chunk-method
+	opts.UserMetadata["Chunk-Method"] = chunkMethod
 
 	// Upload file
 	uploadInfo, err := client.PutObject(
@@ -101,6 +105,7 @@ func main() {
 	objectName := flag.String("object-name", "", "Name for the object in MinIO (optional, uses local filename if empty)")
 	disableMultipart := flag.Bool("disable-multipart", false, "Disable multipart upload")
 	partSize := flag.Uint64("partSize", G, "Disable multipart upload")
+	chunkMethod := flag.String("chunk-method", "FastCDC", "Chunking algorithm to use (FastCDC or FixedCDC)")
 
 	// Parse command line flags
 	flag.Parse()
@@ -146,7 +151,7 @@ func main() {
 
 	// Upload file
 	start := time.Now()
-	uploadInfo, err := uploadLocalFile(ctx, client, *bucketName, *objectName, *localFile, *disableMultipart, *partSize)
+	uploadInfo, err := uploadLocalFile(ctx, client, *bucketName, *objectName, *localFile, *disableMultipart, *partSize, *chunkMethod)
 	if err != nil {
 		fmt.Printf("File upload failed: %v\n", err)
 		os.Exit(1)

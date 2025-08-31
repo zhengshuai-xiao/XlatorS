@@ -317,7 +317,7 @@ func (x *XlatorDedup) ListBuckets(ctx context.Context) ([]minio.BucketInfo, erro
 }
 
 func (x *XlatorDedup) PutObject(ctx context.Context, bucket string, object string, r *minio.PutObjReader, opts minio.ObjectOptions) (objInfo minio.ObjectInfo, err error) {
-	logger.Infof("%s: enter+++++", internal.GetCurrentFuncName())
+	//logger.Infof("%s: enter+++++", internal.GetCurrentFuncName())
 	start1 := time.Now()
 	if err = ValidateBucketNameFormat(bucket); err != nil {
 		logger.Errorf("invalid bucket name format for %s: %v", bucket, err)
@@ -394,6 +394,9 @@ func (x *XlatorDedup) PutObject(ctx context.Context, bucket string, object strin
 			return
 		}
 	}
+
+	logger.Tracef("opts.UserDefined=%v", opts.UserDefined)
+
 	objInfo = minio.ObjectInfo{
 		Bucket:      bucket,
 		Name:        object,
@@ -567,7 +570,7 @@ func (x *XlatorDedup) PutObjectPart(ctx context.Context, bucket string, object s
 	}
 
 	// 2. Process data stream: chunk, dedup, and write new data chunks
-	partSize, writtenSize, manifestList, err := x.writePart(ctx, ns, r, localFPCache)
+	partSize, writtenSize, manifestList, err := x.writePart(ctx, ns, r, objInfo, localFPCache)
 	if err != nil {
 		logger.Errorf("PutObjectPart: failed to process part data for uploadID %s, partID %d: %v", uploadID, partID, err)
 		return pi, err

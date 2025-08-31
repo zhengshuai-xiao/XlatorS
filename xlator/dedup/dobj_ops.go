@@ -183,12 +183,8 @@ func (x *XlatorDedup) writeObj(ctx context.Context, ns string, r *minio.PutObjRe
 	var totalWriteSize int64 = 0
 	start := time.Now()
 
-	// Use FastCDC for content-defined chunking, configured on the xlator.
-	var cdc CDC = &FastCDC{
-		MinChunkSize: x.fastCDCMinSize,
-		AvgChunkSize: x.fastCDCAvgSize,
-		MaxChunkSize: x.fastCDCMaxSize,
-	}
+	// Determine chunking algorithm based on user tags.
+	cdc := getCDCAlgorithm(x, objInfo.UserDefined)
 	chunker, err := cdc.NewChunker(r)
 	if err != nil {
 		logger.Errorf("writeObj: failed to create chunker: %s", err)
@@ -309,16 +305,11 @@ func (x *XlatorDedup) writeObj(ctx context.Context, ns string, r *minio.PutObjRe
 	return manifestList, nil
 }
 
-func (x *XlatorDedup) writePart(ctx context.Context, ns string, r *minio.PutObjReader, localFPCache map[string]uint64) (totalSize int64, totalWriteSize int64, manifestList []ChunkInManifest, err error) {
+func (x *XlatorDedup) writePart(ctx context.Context, ns string, r *minio.PutObjReader, objInfo minio.ObjectInfo, localFPCache map[string]uint64) (totalSize int64, totalWriteSize int64, manifestList []ChunkInManifest, err error) {
 	totalWriteSize = 0
 	start := time.Now()
 
-	// Use FastCDC for content-defined chunking, configured on the xlator.
-	var cdc CDC = &FastCDC{
-		MinChunkSize: x.fastCDCMinSize,
-		AvgChunkSize: x.fastCDCAvgSize,
-		MaxChunkSize: x.fastCDCMaxSize,
-	}
+	cdc := getCDCAlgorithm(x, objInfo.UserDefined)
 	chunker, err := cdc.NewChunker(r)
 	if err != nil {
 		logger.Errorf("writePart: failed to create chunker: %s", err)
