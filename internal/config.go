@@ -17,6 +17,7 @@ type Config struct {
 	MetaDriver    string
 	MetaAddr      string
 	DownloadCache string
+	DSBackendType string
 }
 
 const (

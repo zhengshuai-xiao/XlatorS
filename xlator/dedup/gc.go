@@ -170,15 +170,21 @@ func (x *XlatorDedup) cleanupNamespace(ctx context.Context, namespace string) {
 			}
 
 			// 3. Delete data object from backend
-			err = x.Client.RemoveObject(ctx, backendBucket, dobjName, miniogo.RemoveObjectOptions{})
-			if err != nil {
-				if resp, ok := err.(miniogo.ErrorResponse); !ok || resp.Code != "NoSuchKey" { // nolint:staticcheck
-					logger.Errorf("GCe: failed to remove data object %s/%s from backend: %v. Will retry later.", backendBucket, dobjName, err)
-					continue // Move to the next DOID
+			if x.dsBackendType == DObjBackendS3 {
+				if x.Client == nil {
+					logger.Errorf("GC: S3 backend is configured, but S3 client is not initialized. Skipping deletion of %s/%s.", backendBucket, dobjName)
+					continue
+				}
+				err = x.Client.RemoveObject(ctx, backendBucket, dobjName, miniogo.RemoveObjectOptions{})
+				if err != nil {
+					if resp, ok := err.(miniogo.ErrorResponse); !ok || resp.Code != "NoSuchKey" { // nolint:staticcheck
+						logger.Errorf("GC: failed to remove data object %s/%s from S3 backend: %v. Will retry later.", backendBucket, dobjName, err)
+						continue // Move to the next DOID
+					}
 				}
 			}
 
-			// 4. Delete local cache
+			// 4. Delete local file (which is either the primary storage or a cache)
 			if dobjReader.path != "" {
 				if err := os.Remove(dobjReader.path); err != nil && !os.IsNotExist(err) {
 					logger.Warnf("GC: failed to remove local cache file %s: %v", dobjReader.path, err)

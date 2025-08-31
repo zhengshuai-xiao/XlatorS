@@ -55,6 +55,9 @@ func (x *XlatorDedup) truncateDObj(ctx context.Context, dobj *DObj) (err error) 
 	fps_off := dobj.dob_offset
 	if fps_off <= 8 {
 		logger.Tracef("truncateDObj:nothing need to write")
+		//TODO:if the dedup rate is 100%, there will be a 8 bytes files generated, need to handle this scenario
+		dobj.filer.Close()
+		os.Remove(dobj.path)
 		return nil
 	}
 	//write fps
@@ -78,11 +81,20 @@ func (x *XlatorDedup) truncateDObj(ctx context.Context, dobj *DObj) (err error) 
 		return fmt.Errorf("failed to write fps_off[%d]: %w", fps_off, err)
 	}
 	dobj.filer.Close()
-	//put obj to backend
-	_, err = S3client.UploadFile(ctx, x.Client, dobj.bucket, dobj.dobj_key, dobj.path)
-	//UploadFile(ctx context.Context, core *miniogo.Core, bucket, object, localFilePath string) (miniogo.UploadInfo, error)
-	if err != nil {
-		return fmt.Errorf("failed to upload file[%s]: %w", dobj.path, err)
+
+	// Conditionally upload DObj to S3 backend.
+	if x.dsBackendType == DObjBackendS3 {
+		if x.Client == nil {
+			return fmt.Errorf("S3 backend is configured, but S3 client is not initialized")
+		}
+		//put obj to backend
+		_, err = S3client.UploadFile(ctx, x.Client, dobj.bucket, dobj.dobj_key, dobj.path)
+		if err != nil {
+			return fmt.Errorf("failed to upload file[%s] to S3 backend: %w", dobj.path, err)
+		}
+		logger.Tracef("truncateDObj: uploaded %s to S3 backend.", dobj.path)
+	} else {
+		logger.Tracef("truncateDObj: skipping S3 upload for %s as backend is '%s'.", dobj.path, DObjBackendPOSIX)
 	}
 
 	return nil
@@ -115,13 +127,14 @@ func (x *XlatorDedup) newDObj(dobj *DObj) (err error) {
 func (x *XlatorDedup) writeDObj(ctx context.Context, dobj *DObj, chunks []Chunk) (int, error) {
 	var writenLen int = 0
 	var err error
+	//for the first time, why put here, because I want to make sure there is something to write
+	//just in case creating a null DObj file
 	if dobj.dobj_key == "" {
 		err = x.newDObj(dobj)
 		if err != nil {
 			return 0, err
 		}
 	}
-
 	// A short-lived cache to handle duplicates within this single batch of chunks.
 	// This prevents writing the same chunk multiple times into the same DObj.
 	batchFPCache := make(map[string]uint64)
@@ -476,19 +489,30 @@ func (x *XlatorDedup) getDataObject(bucket, object string, o minio.ObjectOptions
 	dobjReader.path = x.getDobjPathFromLocal(object)
 	_, err = os.Stat(dobjReader.path)
 	if err != nil {
-		if os.IsNotExist(err) {
-			//download from backend
-			opts := miniogo.GetObjectOptions{}
-			opts.ServerSideEncryption = o.ServerSideEncryption
-			dobjCloseReader, _, _, err := x.Client.GetObject(ctx, bucket, object, opts)
-			if err != nil {
-				logger.Errorf("failed to get object[%s] from backend: %s", object, err)
-				return DObjReader{}, err
-			}
-			_, err = internal.WriteReadCloserToFile(dobjCloseReader, dobjReader.path)
-			if err != nil {
-				logger.Errorf("failed to write object[%s] to local disk: %s", object, err)
-				return DObjReader{}, err
+		if os.IsNotExist(err) { // If the file does not exist on local disk
+			// If the backend is S3, try to download it from there.
+			if x.dsBackendType == DObjBackendS3 {
+				if x.Client == nil {
+					return DObjReader{}, fmt.Errorf("S3 backend is configured, but S3 client is not initialized")
+				}
+				logger.Tracef("DObj %s not found in local cache, downloading from S3 backend.", dobjReader.path)
+				//download from backend
+				opts := miniogo.GetObjectOptions{}
+				opts.ServerSideEncryption = o.ServerSideEncryption
+				dobjCloseReader, _, _, err := x.Client.GetObject(ctx, bucket, object, opts)
+				if err != nil {
+					logger.Errorf("failed to get object[%s] from backend: %s", object, err)
+					return DObjReader{}, err
+				}
+				_, err = internal.WriteReadCloserToFile(dobjCloseReader, dobjReader.path)
+				if err != nil {
+					logger.Errorf("failed to write object[%s] to local disk: %s", object, err)
+					return DObjReader{}, err
+				}
+			} else {
+				// If the backend is local and the file doesn't exist, it's an error.
+				logger.Errorf("getDataObject: DObj %s not found on local disk for '%s' backend.", dobjReader.path, DObjBackendPOSIX)
+				return DObjReader{}, err // err is os.IsNotExist
 			}
 		} else {
 			logger.Errorf("failed to stat object[%s] on local disk: %s", dobjReader.path, err)

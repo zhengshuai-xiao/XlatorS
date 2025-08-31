@@ -60,6 +60,7 @@ type XlatorDedup struct {
 	fastCDCMinSize       int
 	fastCDCAvgSize       int
 	fastCDCMaxSize       int
+	dsBackendType        DObjBackendType // datastore bankend type: "posix" or "s3"
 }
 
 var logger = internal.GetLogger("XlatorDedup")
@@ -71,6 +72,7 @@ func NewXlatorDedup(gConf *internal.Config) (*XlatorDedup, error) {
 		return nil, fmt.Errorf("Invalid Xlator configuration(%s!=%s)", gConf.Xlator, XlatorName)
 	}
 
+	//prepare to connect to backend s3
 	metaconf := NewMetaConfig()
 	redismeta, err := NewRedisMeta(gConf.MetaDriver, gConf.MetaAddr, metaconf)
 	if err != nil {
@@ -78,22 +80,12 @@ func NewXlatorDedup(gConf *internal.Config) (*XlatorDedup, error) {
 		return nil, err
 	}
 	metrics := minio.NewMetrics()
-
 	t := &minio.MetricsTransport{
 		Transport: minio.NewGatewayHTTPTransport(),
 		Metrics:   metrics,
 	}
-	s3 := &S3client.S3{Host: gConf.BackendAddr}
-	logger.Info("NewS3Gateway Endpoint:", s3.Host)
-	creds := auth.Credentials{}
-	client, err := s3.NewGatewayLayer(creds, t)
-	if err != nil {
-		logger.Errorf("failed to create S3 client: %v", err)
-		return nil, err
-	}
 
 	xlatorDedup := &XlatorDedup{
-		Client: client,
 		HTTPClient: &http.Client{
 			Transport: t,
 		},
@@ -102,6 +94,28 @@ func NewXlatorDedup(gConf *internal.Config) (*XlatorDedup, error) {
 		dobjCachePath:     gConf.DownloadCache,
 		stopGC:            make(chan struct{}),
 		multiPartFPCaches: make(map[string]map[string]uint64),
+	}
+
+	// Configure DObj backend type from command-line argument.
+	xlatorDedup.dsBackendType = DObjBackendType(strings.ToLower(gConf.DSBackendType))
+	if xlatorDedup.dsBackendType == "" {
+		xlatorDedup.dsBackendType = DObjBackendPOSIX // Default to posix
+	}
+	if xlatorDedup.dsBackendType != DObjBackendPOSIX && xlatorDedup.dsBackendType != DObjBackendS3 {
+		return nil, fmt.Errorf("invalid DObj backend type value: %s. Must be '%s' or '%s'", gConf.DSBackendType, DObjBackendPOSIX, DObjBackendS3)
+	}
+	logger.Infof("Using DObj backend type: %s", xlatorDedup.dsBackendType)
+
+	if xlatorDedup.dsBackendType == DObjBackendS3 {
+		s3 := &S3client.S3{Host: gConf.BackendAddr}
+		logger.Info("NewS3Gateway Endpoint:", s3.Host)
+		creds := auth.Credentials{}
+		client, err := s3.NewGatewayLayer(creds, t)
+		if err != nil {
+			logger.Errorf("failed to create S3 client: %v", err)
+			return nil, err
+		}
+		xlatorDedup.Client = client
 	}
 
 	// Configure FastCDC parameters from environment variables, with sane defaults.
@@ -151,24 +165,6 @@ func NewXlatorDedup(gConf *internal.Config) (*XlatorDedup, error) {
 	return xlatorDedup, nil
 }
 
-/*
-	func (x *XlatorDedup) CreateBackendBucket() (err error) {
-		ctx := context.Background()
-		var ok bool
-		if ok, err = x.Client.BucketExists(ctx, BackendBucket); err != nil {
-			return minio.ErrorRespToObjectError(err, BackendBucket)
-		}
-		if !ok {
-			err = x.Client.MakeBucket(ctx, BackendBucket, miniogo.MakeBucketOptions{Region: "us-east-1", ObjectLocking: false})
-			if err != nil {
-				return minio.ErrorRespToObjectError(err, BackendBucket)
-			}
-			logger.Infof("Created backend bucket: %s", BackendBucket)
-		}
-
-		return nil
-	}
-*/
 func (x *XlatorDedup) Shutdown(ctx context.Context) error {
 	logger.Info("Shutting down Dedup xlator...")
 	close(x.stopGC) // Signal GC to stop
@@ -198,12 +194,14 @@ func (x *XlatorDedup) IsReady(_ context.Context) bool {
 // StorageInfo is not relevant to S3 backend.
 func (x *XlatorDedup) StorageInfo(ctx context.Context) (si minio.StorageInfo, _ []error) {
 	si.Backend.Type = madmin.Gateway
-	host := x.Client.EndpointURL().Host
-	if x.Client.EndpointURL().Port() == "" {
-		host = x.Client.EndpointURL().Host + ":" + x.Client.EndpointURL().Scheme
+	if x.dsBackendType == DObjBackendS3 && x.Client != nil {
+		host := x.Client.EndpointURL().Host
+		if x.Client.EndpointURL().Port() == "" {
+			host = x.Client.EndpointURL().Host + ":" + x.Client.EndpointURL().Scheme
+		}
+		si.Backend.GatewayOnline = minio.IsBackendOnline(ctx, host)
 	}
-	si.Backend.GatewayOnline = minio.IsBackendOnline(ctx, host)
-
+	// For 'posix' backend, GatewayOnline remains false, which is acceptable.
 	return si, nil
 }
 
@@ -242,17 +240,22 @@ func (x *XlatorDedup) MakeBucketWithLocation(ctx context.Context, bucket string,
 	}
 
 	//Create backend bucket with location(Namespace)
-	backendBucket := GetBackendBucketName(ns)
-	ok, err := x.Client.BucketExists(ctx, backendBucket)
-	if err != nil {
-		return minio.ErrorRespToObjectError(err, backendBucket)
-	}
-	if !ok {
-		//the bucket is not existed
-		logger.Infof("new backend bucket name: %s in location:%s", backendBucket, opts.Location)
-		err = x.Client.MakeBucket(ctx, backendBucket, miniogo.MakeBucketOptions{Region: opts.Location})
+	if x.dsBackendType == DObjBackendS3 {
+		if x.Client == nil {
+			return fmt.Errorf("S3 backend is configured, but S3 client is not initialized")
+		}
+		backendBucket := GetBackendBucketName(ns)
+		ok, err := x.Client.BucketExists(ctx, backendBucket)
 		if err != nil {
 			return minio.ErrorRespToObjectError(err, backendBucket)
+		}
+		if !ok {
+			//the bucket is not existed
+			logger.Infof("new backend bucket name: %s in location:%s", backendBucket, opts.Location)
+			err = x.Client.MakeBucket(ctx, backendBucket, miniogo.MakeBucketOptions{Region: opts.Location})
+			if err != nil {
+				return minio.ErrorRespToObjectError(err, backendBucket)
+			}
 		}
 	}
 
@@ -339,17 +342,21 @@ func (x *XlatorDedup) PutObject(ctx context.Context, bucket string, object strin
 		logger.Errorf("failed to parse Namespace from %s", bucket)
 		return objInfo, err
 	}
-
-	backendBucket := GetBackendBucketName(ns)
-	exists, err := x.Client.BucketExists(ctx, backendBucket)
-	if err != nil {
-		logger.Errorf("PutObject: failed to check backend bucket %s existence: %v", backendBucket, err)
-		return objInfo, minio.ErrorRespToObjectError(err, backendBucket)
-	}
-	if !exists {
-		err = fmt.Errorf("internal error: backend bucket %s not found", backendBucket)
-		logger.Error(err)
-		return objInfo, minio.ErrorRespToObjectError(err, bucket)
+	if x.dsBackendType == DObjBackendS3 {
+		if x.Client == nil {
+			return objInfo, fmt.Errorf("S3 backend is configured, but S3 client is not initialized")
+		}
+		backendBucket := GetBackendBucketName(ns)
+		exists, err := x.Client.BucketExists(ctx, backendBucket)
+		if err != nil {
+			logger.Errorf("PutObject: failed to check backend bucket %s existence: %v", backendBucket, err)
+			return objInfo, minio.ErrorRespToObjectError(err, backendBucket)
+		}
+		if !exists {
+			err = fmt.Errorf("internal error: backend bucket %s not found", backendBucket)
+			logger.Error(err)
+			return objInfo, minio.ErrorRespToObjectError(err, bucket)
+		}
 	}
 
 	// No metadata is set, allocate a new one.
@@ -482,16 +489,21 @@ func (x *XlatorDedup) NewMultipartUpload(ctx context.Context, bucket string, obj
 		return "", err
 	}
 
-	backendBucket := GetBackendBucketName(ns)
-	exists, err := x.Client.BucketExists(ctx, backendBucket)
-	if err != nil {
-		logger.Errorf("NewMultipartUpload: failed to check backend bucket %s existence: %v", backendBucket, err)
-		return "", minio.ErrorRespToObjectError(err, backendBucket)
-	}
-	if !exists {
-		err = fmt.Errorf("internal error: backend bucket %s not found", backendBucket)
-		logger.Error(err)
-		return "", minio.ErrorRespToObjectError(err, bucket)
+	if x.dsBackendType == DObjBackendS3 {
+		if x.Client == nil {
+			return "", fmt.Errorf("S3 backend is configured, but S3 client is not initialized")
+		}
+		backendBucket := GetBackendBucketName(ns)
+		exists, err := x.Client.BucketExists(ctx, backendBucket)
+		if err != nil {
+			logger.Errorf("NewMultipartUpload: failed to check backend bucket %s existence: %v", backendBucket, err)
+			return "", minio.ErrorRespToObjectError(err, backendBucket)
+		}
+		if !exists {
+			err = fmt.Errorf("internal error: backend bucket %s not found", backendBucket)
+			logger.Error(err)
+			return "", minio.ErrorRespToObjectError(err, bucket)
+		}
 	}
 	// Following PutObject, we get a manifest ID first. This will also serve as the upload ID.
 	uploadID, err = x.Mdsclient.GetIncreasedManifestID()

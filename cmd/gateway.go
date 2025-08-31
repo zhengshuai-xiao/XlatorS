@@ -74,11 +74,6 @@ func cmdGateway() *cli.Command {
 			Usage: "domain for virtual-host-style requests",
 		},
 		&cli.StringFlag{
-			Name:  "refresh-iam-interval",
-			Value: "5m",
-			Usage: "interval to reload gateway IAM from configuration",
-		},
-		&cli.StringFlag{
 			Name:  "downloadCache",
 			Value: "/dedup_data/",
 			Usage: "the download Cache path for Dedup",
@@ -97,6 +92,11 @@ func cmdGateway() *cli.Command {
 			Name:  "meta-addr",
 			Value: "127.0.0.1:6379/1",
 			Usage: "the address of the metadata storage",
+		},
+		&cli.StringFlag{
+			Name:  "ds-backend",
+			Value: string(dedup.DObjBackendPOSIX),
+			Usage: fmt.Sprintf("Deduplication data store backend type ('%s' or '%s')", dedup.DObjBackendPOSIX, dedup.DObjBackendS3),
 		},
 		&cli.StringFlag{
 			Name:  "xlator",
@@ -219,6 +219,7 @@ func gateway(c *cli.Context) error {
 				MetaDriver:    "redis",
 				MetaAddr:      c.String("meta-addr"),
 				DownloadCache: c.String("downloadCache"),
+				DSBackendType: c.String("ds-backend"),
 			},
 		)
 	} else if c.String("xlator") == "CryptoCompress" { //cryptocompress.XlatorName {
