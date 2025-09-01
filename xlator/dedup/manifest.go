@@ -14,13 +14,16 @@ package dedup
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 
+	miniogo "github.com/minio/minio-go/v7"
 	"github.com/zhengshuai-xiao/XlatorS/internal"
+	S3client "github.com/zhengshuai-xiao/XlatorS/pkg/s3client"
 )
 
 // getManifestPath generates a sharded file path for a manifest based on its ID.
@@ -33,10 +36,10 @@ func (x *XlatorDedup) getManifestPath(manifestID string) (string, error) {
 	return filepath.Join(dir, manifestID), nil
 }
 
-// writeManifestToFile serializes a manifest and writes it to a file.
+// writeManifest serializes a manifest, writes it to a local file, and conditionally uploads it to the S3 backend.
 // The file format is:
 // [8-byte offset to DOID set] [ChunkInManifest entries...] [Unique DOID set...]
-func (x *XlatorDedup) writeManifestToFile(manifestID string, manifestList []ChunkInManifest) ([]uint64, error) {
+func (x *XlatorDedup) writeManifest(ctx context.Context, namespace string, manifestID string, manifestList []ChunkInManifest) ([]uint64, error) {
 	path, err := x.getManifestPath(manifestID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get manifest path: %w", err)
@@ -86,11 +89,25 @@ func (x *XlatorDedup) writeManifestToFile(manifestID string, manifestList []Chun
 	}
 
 	logger.Tracef("Successfully wrote manifest %s with %d chunks.", manifestID, len(manifestList))
+
+	// Conditionally upload manifest file to S3 backend.
+	if x.dsBackendType == DObjBackendS3 {
+		if x.Client == nil {
+			return nil, fmt.Errorf("S3 backend is configured, but S3 client is not initialized")
+		}
+		backendBucket := GetBackendBucketName(namespace)
+		_, err = S3client.UploadFile(ctx, x.Client, backendBucket, manifestID, path)
+		if err != nil {
+			return nil, fmt.Errorf("failed to upload manifest file '%s' to S3 backend: %w", path, err)
+		}
+		logger.Tracef("Successfully uploaded manifest %s to S3 backend bucket %s.", manifestID, backendBucket)
+	}
+
 	return uniqueDoidList, nil
 }
 
-// readManifestFromFile reads and deserializes a manifest from a file.
-func (x *XlatorDedup) readManifestFromFile(manifestID string) ([]ChunkInManifest, error) {
+// readManifest reads and deserializes a manifest. It ensures the manifest is available locally, downloading from S3 if necessary.
+func (x *XlatorDedup) readManifest(ctx context.Context, namespace, manifestID string) ([]ChunkInManifest, error) {
 	path, err := x.getManifestPath(manifestID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get manifest path: %w", err)
@@ -126,11 +143,25 @@ func (x *XlatorDedup) readManifestFromFile(manifestID string) ([]ChunkInManifest
 	return manifestList, nil
 }
 
-// deleteManifestFile removes a manifest file from the cache.
-func (x *XlatorDedup) deleteManifestFile(manifestID string) error {
+// deleteManifest removes a manifest from the local cache and the S3 backend.
+func (x *XlatorDedup) deleteManifest(ctx context.Context, namespace, manifestID string) error {
 	if manifestID == "" {
 		return nil // Nothing to delete
 	}
+
+	// Delete from S3 backend first.
+	if x.dsBackendType == DObjBackendS3 {
+		if x.Client == nil {
+			return fmt.Errorf("S3 backend is configured, but S3 client is not initialized")
+		}
+		backendBucket := GetBackendBucketName(namespace)
+		err := x.Client.RemoveObject(ctx, backendBucket, manifestID, miniogo.RemoveObjectOptions{})
+		if err != nil && miniogo.ToErrorResponse(err).Code != "NoSuchKey" {
+			logger.Warnf("Failed to delete manifest %s from S3 backend: %v", manifestID, err)
+			// We can choose to continue to delete the local file anyway.
+		}
+	}
+
 	path, err := x.getManifestPath(manifestID)
 	if err != nil {
 		return fmt.Errorf("failed to get manifest path for deletion: %w", err)
@@ -145,13 +176,13 @@ func (x *XlatorDedup) deleteManifestFile(manifestID string) error {
 	return nil
 }
 
-// readUniqueDoidsFromFile reads only the unique DOID set from a manifest file.
-// This is more efficient than readManifestFromFile when only the DOID list is needed,
+// readUniqueDoids reads only the unique DOID set from a manifest.
+// This is more efficient than readManifest when only the DOID list is needed,
 // for example during garbage collection reference counting.
-func (x *XlatorDedup) readUniqueDoidsFromFile(manifestID string) ([]uint64, error) {
-	path, err := x.getManifestPath(manifestID)
+func (x *XlatorDedup) readUniqueDoids(ctx context.Context, namespace, manifestID string) ([]uint64, error) {
+	path, err := x.ensureManifestLocal(ctx, namespace, manifestID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get manifest path: %w", err)
+		return nil, err
 	}
 
 	file, err := os.Open(path)
@@ -191,4 +222,53 @@ func (x *XlatorDedup) readUniqueDoidsFromFile(manifestID string) ([]uint64, erro
 
 	logger.Tracef("Successfully read %d unique DOIDs from manifest %s.", len(uniqueDoids), manifestID)
 	return uniqueDoids, nil
+}
+
+// ensureManifestLocal checks if a manifest file exists locally, and if not,
+// downloads it from the S3 backend if configured.
+func (x *XlatorDedup) ensureManifestLocal(ctx context.Context, namespace, manifestID string) (string, error) {
+	path, err := x.getManifestPath(manifestID)
+	if err != nil {
+		return "", fmt.Errorf("failed to get manifest path: %w", err)
+	}
+
+	// Check if the manifest file exists locally.
+	_, err = os.Stat(path)
+	if err == nil {
+		return path, nil // File exists locally.
+	}
+
+	if !os.IsNotExist(err) {
+		// Another error occurred while stating the file.
+		return "", fmt.Errorf("failed to stat manifest file %s: %w", path, err)
+	}
+
+	// File does not exist locally.
+	if x.dsBackendType == DObjBackendS3 {
+		if x.Client == nil {
+			return "", fmt.Errorf("S3 backend is configured, but S3 client is not initialized")
+		}
+		logger.Tracef("Manifest %s not found in local cache, downloading from S3 backend.", manifestID)
+
+		backendBucket := GetBackendBucketName(namespace)
+		opts := miniogo.GetObjectOptions{}
+		manifestReader, _, _, err := x.Client.GetObject(ctx, backendBucket, manifestID, opts)
+		if err != nil {
+			return "", fmt.Errorf("failed to get manifest %s from backend: %w", manifestID, err)
+		}
+
+		// Ensure the local directory exists before writing the file.
+		if err := os.MkdirAll(filepath.Dir(path), 0750); err != nil {
+			return "", fmt.Errorf("failed to create manifest directory for download: %w", err)
+		}
+
+		_, err = internal.WriteReadCloserToFile(manifestReader, path)
+		if err != nil {
+			return "", fmt.Errorf("failed to write manifest %s to local disk: %w", manifestID, err)
+		}
+		return path, nil
+	}
+
+	// If backend is posix and file doesn't exist, it's a not found error.
+	return "", os.ErrNotExist
 }

@@ -16,6 +16,7 @@ func main() {
 			calcFPCmd(),
 			getAWSCmd(),
 			gcTriggerCmd(),
+			deleteCmd(),
 		},
 	}
 

@@ -651,12 +651,17 @@ func (x *XlatorDedup) readObject(ctx context.Context, bucket, object string, sta
 	logger.Tracef("readObject enter")
 	backendBucket := GetBackendBucketNameViaBucketName(bucket)
 
+	ns, _, err := ParseNamespaceAndBucket(bucket)
+	if err != nil {
+		return fmt.Errorf("readObject: failed to parse namespace from bucket %s: %w", bucket, err)
+	}
+
 	manifestID, ok := objInfo.UserDefined[ManifestIDKey]
 	if !ok || manifestID == "" {
 		return fmt.Errorf("manifest ID not found for object %s/%s", bucket, object)
 	}
 
-	manifest, err := x.readManifestFromFile(manifestID)
+	manifest, err := x.readManifest(ctx, ns, manifestID)
 	if err != nil {
 		logger.Errorf("readObject: failed to get object manifest[%s] err: %s", object, err)
 		return
