@@ -20,8 +20,8 @@ type MDS interface {
 	DelBucket(bucket string) error
 	ListBuckets() ([]minio.BucketInfo, error)
 	ListObjects(bucket string, prefix string) ([]minio.ObjectInfo, error)
-	DelObjectMeta(bucket string, obj string) ([]uint64, error)
-	PutObjectMeta(object minio.ObjectInfo, manifestList []ChunkInManifest) error
+	DelObjectMeta(bucket string, obj string) error
+	PutObjectMeta(object minio.ObjectInfo, uniqueDOidlist []uint64) error
 	GetObjectMeta(object *minio.ObjectInfo) error
 	GetObjectInfo(bucket string, obj string) (minio.ObjectInfo, error)
 	BucketExist(bucket string) (bool, error)
@@ -29,14 +29,11 @@ type MDS interface {
 	GetDObjNameInMDS(id uint64) string
 	GetDOIDFromDObjName(string) (int64, error)
 	GetIncreasedManifestID() (string, error)
-	WriteManifest(manifestid string, manifestList []ChunkInManifest) error
 	InitMultipartUpload(uploadID string, objInfo minio.ObjectInfo) error
 	GetMultipartUploadInfo(uploadID string) (minio.ObjectInfo, error)
 	AddMultipartPart(uploadID string, partID int, partInfo PartInfoWithStats, manifestList []ChunkInManifest) error
 	ListMultipartParts(uploadID string) (map[string]PartInfoWithStats, map[string][]ChunkInManifest, error)
 	CleanupMultipartUpload(uploadID string) error
-	GetManifest(manifestid string) (chunks []ChunkInManifest, err error)
-	GetObjectManifest(bucket, object string) (chunks []ChunkInManifest, err error)
 	DedupFPs(namespace string, chunks []Chunk) error
 	DedupFPsBatch(namespace string, chunks []Chunk) error
 	InsertFPs(namespace string, chunks []ChunkInManifest) error

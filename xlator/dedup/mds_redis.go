@@ -404,7 +404,7 @@ func (m *MDSRedis) ListObjects(bucket string, prefix string) (result []minio.Obj
 	return result, nil
 }
 
-func (m *MDSRedis) PutObjectMeta(object minio.ObjectInfo, manifestList []ChunkInManifest) error {
+func (m *MDSRedis) PutObjectMeta(object minio.ObjectInfo, uniqueDOidlist []uint64) error {
 	ctx := context.Background()
 	ns, _, err := ParseNamespaceAndBucket(object.Bucket)
 	if err != nil {
@@ -416,28 +416,16 @@ func (m *MDSRedis) PutObjectMeta(object minio.ObjectInfo, manifestList []ChunkIn
 		return fmt.Errorf("manifest ID not found in object metadata for object %s/%s", object.Bucket, object.Name)
 	}
 
-	//write manifest
-	logger.Tracef("MDSRedis::PutObjectMeta: writing manifest for object[%s], manifestname:%s, len:%d", object.Name, manifestID, len(manifestList))
-	doidSet, err := m.writeManifestReturnDOidList(manifestID, manifestList)
-	if err != nil {
-		//cleanup the manifest, ignore if it is failed
-		m.delManifest(ctx, manifestID)
-		return err
-	}
 	//write reference
-	err = m.AddReference(ns, doidSet.Elements(), object.Name)
+	err = m.AddReference(ns, uniqueDOidlist, object.Name)
 	if err != nil {
-		//cleanup the manifest, ignore if it is failed
-		m.delManifest(ctx, manifestID)
 		return err
 	}
 	//write object
 	jsondata, err := json.Marshal(object)
 	if err != nil {
-		//cleanup the manifest, ignore if it is failed
-		m.delManifest(ctx, manifestID)
 		//cleanup the reference
-		m.RemoveReference(ns, doidSet.Elements(), object.Name)
+		m.RemoveReference(ns, uniqueDOidlist, object.Name)
 		return err
 	}
 	err = m.Rdb.HSet(ctx, object.Bucket, object.Name, jsondata).Err()
@@ -484,63 +472,16 @@ func (m *MDSRedis) GetObjectMeta(object *minio.ObjectInfo) error {
 // 4. Removes the object's reference from each of the associated DOIDs.
 // 5. If a DOID's reference count drops to zero after this removal, its ID is collected.
 // 6. Deletes the primary object metadata entry from the bucket's hash.
-// It returns a slice of DOIDs that have become dereferenced (ref count is zero) and are now eligible for garbage collection.
-func (m *MDSRedis) DelObjectMeta(bucket string, obj string) (dereferencedDObjIDs []uint64, err error) {
+// This function now only deletes the object's primary metadata entry.
+// Reference counting and manifest deletion are handled at the xlator level.
+func (m *MDSRedis) DelObjectMeta(bucket string, obj string) error {
 	ctx := context.Background()
-	logger.Tracef("GetObjectMeta:bucket:%s,object:%s", bucket, obj)
-	objInfo := minio.ObjectInfo{
-		Bucket: bucket,
-		Name:   obj,
-	}
-
-	objKey := objInfo.Name
-	// Step 1: Retrieve the object's metadata to find its manifest ID.
-	err = m.GetObjectMeta(&objInfo)
+	err := m.Rdb.HDel(ctx, bucket, obj).Err()
 	if err != nil {
-		logger.Errorf("failed to GetObjectMeta object:%s", objKey)
-		return nil, err
+		logger.Errorf("failed to delete object[%s] meta from bucket %s, err:%s", obj, bucket, err)
+		return err
 	}
-	// The manifest ID is stored in the UserDefined field.
-	mfid, ok := objInfo.UserDefined[ManifestIDKey]
-	if !ok || mfid == "" {
-		return nil, fmt.Errorf("manifest ID not found in object metadata for object %s/%s", bucket, obj)
-	}
-	// Step 2: Get the list of DOIDs from the manifest.
-	_, doidSet, err := m.getManifestAndDOIDSet(mfid)
-	if err != nil {
-		logger.Errorf("failed to GetManifest[%s], err:%s", mfid, err)
-		return nil, err
-	}
-
-	dobjIDs := doidSet.Elements()
-	// Step 3: Delete the manifest list from Redis.
-	err = m.delManifest(ctx, mfid)
-	if err != nil {
-		logger.Errorf("failed to delete manifest:%s, err:%s", mfid, err)
-		// The state is now inconsistent. Return the found DOIDs with the error.
-		return dobjIDs, err
-	}
-	// Step 4 & 5: Remove the object's reference from all associated DOIDs and get the list of dereferenced ones.
-	ns, _, err := ParseNamespaceAndBucket(bucket)
-	if err != nil {
-		logger.Errorf("failed to parse namespace and bucket: %s for object:%s", err, objInfo.Name)
-		return nil, err
-	}
-	//dereferencedDObjIDs means the DOID in this list is no one to referenced, can be deleted from backend storage
-	dereferencedDObjIDs, err = m.RemoveReference(ns, dobjIDs, objKey)
-	if err != nil {
-		logger.Errorf("failed to RemoveReference for object:%s, err:%s", objKey, err)
-		return nil, err
-	}
-	//delete relevent fp in FPCache
-
-	// Step 6: Delete the object's metadata key from the bucket's hash.
-	err = m.Rdb.HDel(ctx, bucket, objKey).Err()
-	if err != nil {
-		logger.Errorf("failed to delete object[%s] meta, err:%s", objKey, err)
-		return dereferencedDObjIDs, err
-	}
-	return dereferencedDObjIDs, nil
+	return nil
 }
 
 /*

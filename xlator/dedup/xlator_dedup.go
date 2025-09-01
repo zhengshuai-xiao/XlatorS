@@ -443,9 +443,17 @@ func (x *XlatorDedup) PutObject(ctx context.Context, bucket string, object strin
 	elapsed1 := time.Since(start1)
 	start2 := time.Now()
 	logger.Infof("PutObject 3, manifestList=%d, elapsed1=%f", len(manifestList), elapsed1.Seconds())
-	//commit meta data
-	err = x.Mdsclient.PutObjectMeta(objInfo, manifestList)
+	uniqueDoids, err := x.writeManifestToFile(manifestID, manifestList)
+	// Write manifest to a file
 	if err != nil {
+		logger.Errorf("failed to write manifest file for object %s: %v", object, err)
+		return objInfo, err
+	}
+
+	//commit meta data
+	err = x.Mdsclient.PutObjectMeta(objInfo, uniqueDoids)
+	if err != nil {
+		//TODO: cleanup manifest?
 		logger.Errorf("failed to commit metadata for object %s: %v", object, err)
 		return objInfo, err
 	}
@@ -704,7 +712,15 @@ func (x *XlatorDedup) CompleteMultipartUpload(ctx context.Context, bucket string
 		return oi, err
 	}
 
-	if err = x.Mdsclient.PutObjectMeta(objInfo, finalManifest); err != nil {
+	manifestID := objInfo.UserDefined[ManifestIDKey]
+	uniqueDoids, err := x.writeManifestToFile(manifestID, finalManifest)
+	if err != nil {
+		logger.Errorf("CompleteMultipartUpload: failed to write final manifest file for %s/%s: %v", bucket, object, err)
+		return oi, err
+	}
+
+	// Commit the final object metadata (without the manifest list).
+	if err = x.Mdsclient.PutObjectMeta(objInfo, uniqueDoids); err != nil {
 		logger.Errorf("CompleteMultipartUpload: failed to commit final metadata for %s/%s: %v", bucket, object, err)
 		return oi, err
 	}
@@ -795,25 +811,67 @@ func (x *XlatorDedup) NewNSLock(bucket string, objects ...string) minio.RWLocker
 func (x *XlatorDedup) DeleteObject(ctx context.Context, bucket string, object string, opts minio.ObjectOptions) (minio.ObjectInfo, error) {
 	logger.Tracef("%s: enter", internal.GetCurrentFuncName())
 
-	// Step 1: Delete metadata and get dereferenced DOIDs
-	dobjIDs, err := x.Mdsclient.DelObjectMeta(bucket, object)
+	// Get object info to retrieve the manifest ID.
+	objInfo, err := x.Mdsclient.GetObjectInfo(bucket, object)
 	if err != nil {
+		// If the object doesn't exist, it's a success for a delete operation.
+		if _, ok := err.(minio.ObjectNotFound); ok {
+			return minio.ObjectInfo{Bucket: bucket, Name: object}, nil
+		}
 		return minio.ObjectInfo{}, minio.ErrorRespToObjectError(err, bucket, object)
 	}
 
-	// Step 2: If any DOIDs became dereferenced, add them to the GC queue
-	if len(dobjIDs) > 0 {
+	manifestID := objInfo.UserDefined[ManifestIDKey]
+	if manifestID == "" {
+		logger.Warnf("DeleteObject: manifest ID is empty for %s/%s. Deleting metadata only.", bucket, object)
+	}
+
+	var dereferencedDObjIDs []uint64
+	if manifestID != "" {
+		// Step 1: Get the list of DOIDs this object references.
+		dobjIDs, err := x.readUniqueDoidsFromFile(manifestID)
+		if err != nil && !os.IsNotExist(err) {
+			// Log the error but proceed with deletion of metadata. The manifest file will become an orphan.
+			logger.Errorf("DeleteObject: failed to read unique DOIDs from manifest %s: %v", manifestID, err)
+		}
+
+		// Step 2: Decrement references and get the list of DOIDs that are now free.
+		if len(dobjIDs) > 0 {
+			ns, _, err := ParseNamespaceAndBucket(bucket)
+			if err != nil {
+				logger.Errorf("DeleteObject: failed to parse namespace for bucket %s: %v", bucket, err)
+			} else {
+				dereferencedDObjIDs, err = x.Mdsclient.RemoveReference(ns, dobjIDs, object)
+				if err != nil {
+					// This is a more critical error, as it can lead to data leaks.
+					logger.Errorf("DeleteObject: failed to remove references for object %s: %v", object, err)
+					return minio.ObjectInfo{}, minio.ErrorRespToObjectError(err, bucket, object)
+				}
+			}
+		}
+	}
+
+	// Step 3: Delete the object's primary metadata entry.
+	if err := x.Mdsclient.DelObjectMeta(bucket, object); err != nil {
+		// If this fails, we have an inconsistent state. The references may have been removed, but the object still appears to exist.
+		logger.Errorf("DeleteObject: CRITICAL: failed to delete object metadata for %s/%s: %v", bucket, object, err)
+		return minio.ObjectInfo{}, minio.ErrorRespToObjectError(err, bucket, object)
+	}
+
+	// Step 4: Delete the manifest file now that it's no longer needed.
+	_ = x.deleteManifestFile(manifestID)
+
+	// Step 5: If any DOIDs became dereferenced, add them to the GC queue
+	if len(dereferencedDObjIDs) > 0 {
 		ns, _, err := ParseNamespaceAndBucket(bucket)
 		if err != nil {
 			logger.Errorf("DeleteObject: failed to parse namespace for bucket %s: %v", bucket, err)
-			// Log the error but continue, as the primary object meta is already deleted.
 		} else {
-			err = x.Mdsclient.AddDeletedDOIDs(ns, dobjIDs)
+			err = x.Mdsclient.AddDeletedDOIDs(ns, dereferencedDObjIDs)
 			if err != nil {
-				logger.Errorf("DeleteObject: failed to add DOIDs %v to GC queue for namespace %s: %v", dobjIDs, ns, err)
-				// This is not a critical failure for the user, but should be monitored.
+				logger.Errorf("DeleteObject: failed to add DOIDs %v to GC queue for namespace %s: %v", dereferencedDObjIDs, ns, err)
 			} else {
-				logger.Infof("DeleteObject: added %d DOIDs to GC queue for namespace %s.", len(dobjIDs), ns)
+				logger.Infof("DeleteObject: added %d DOIDs to GC queue for namespace %s.", len(dereferencedDObjIDs), ns)
 			}
 		}
 	}
@@ -844,7 +902,18 @@ func (x *XlatorDedup) GetObject(ctx context.Context, bucket, object string, star
 	if length < 0 && length != -1 {
 		return minio.ErrorRespToObjectError(minio.InvalidRange{}, bucket, object)
 	}
-	err = x.readObject(ctx, bucket, object, startOffset, length, writer, etag, opts)
+
+	objInfo, err := x.GetObjectInfo(ctx, bucket, object, opts)
+	if err != nil {
+		return minio.ErrorRespToObjectError(err, bucket, object)
+	}
+
+	// If an etag is provided, verify it matches the object's ETag.
+	if etag != "" && objInfo.ETag != etag {
+		return minio.ErrorRespToObjectError(minio.PreConditionFailed{}, bucket, object)
+	}
+
+	err = x.readObject(ctx, bucket, object, startOffset, length, writer, objInfo, opts)
 	if err != nil {
 		logger.Errorf("GetObject: failed to read object[%s] err: %s", object, err)
 		return minio.ErrorRespToObjectError(err, bucket, object)

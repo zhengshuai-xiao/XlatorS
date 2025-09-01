@@ -25,7 +25,7 @@ ALL_BINARIES = $(MAIN_BINARY) $(XC_BINARY)
 all: build
 
 # Phony targets are not files
-.PHONY: all build dbuild test run clean cleancache deps help
+.PHONY: all build dbuild rebuild test run clean cleancache deps help
 
 # Build targets
 build: $(ALL_BINARIES) ## Build all binaries for release
@@ -45,6 +45,8 @@ $(XC_BINARY): $(wildcard $(XC_SRC_DIR)/*.go)
 	@echo "--> Building utility: xc"
 	@mkdir -p $(BINARY_DIR)
 	$(GOBUILD) -ldflags="$(LDFLAGS)" -o $@ ./$(XC_SRC_DIR)
+
+rebuild: clean build ## Rebuild all binaries from scratch
 
 # Other targets
 test: ## Run unit tests

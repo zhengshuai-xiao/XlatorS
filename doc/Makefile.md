@@ -13,6 +13,7 @@ Here is a list of available targets and their descriptions. You can see this lis
 -   `all`: This is the default target. It runs the `build` target.
 -   `build`: Compiles all source code and creates release-ready binaries in the `./bin` directory. This includes the main `xlators` application and all utilities.
 -   `dbuild`: Compiles all source code with debugging information enabled. This is useful for development and debugging with tools like Delve.
+-   `rebuild`: Cleans the project and then builds all binaries from scratch.
 -   `test`: Runs all unit tests in the project.
 -   `deps`: Runs `go mod tidy` to ensure the `go.mod` file is consistent with the source code.
 -   `clean`: Removes all compiled binaries from the `./bin` directory.

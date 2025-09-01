@@ -85,8 +85,8 @@ func (m *MockMDS) ListBuckets() ([]minio.BucketInfo, error) {
 	return args.Get(0).([]minio.BucketInfo), args.Error(1)
 }
 
-func (m *MockMDS) PutObjectMeta(objInfo minio.ObjectInfo, manifest []ChunkInManifest) error {
-	args := m.Called(objInfo, manifest)
+func (m *MockMDS) PutObjectMeta(objInfo minio.ObjectInfo, uniqueDOidlist []uint64) error {
+	args := m.Called(objInfo, uniqueDOidlist)
 	return args.Error(0)
 }
 
@@ -95,19 +95,14 @@ func (m *MockMDS) GetObjectInfo(bucket, object string) (minio.ObjectInfo, error)
 	return args.Get(0).(minio.ObjectInfo), args.Error(1)
 }
 
-func (m *MockMDS) GetObjectManifest(bucket, object string) ([]ChunkInManifest, error) {
-	args := m.Called(bucket, object)
-	return args.Get(0).([]ChunkInManifest), args.Error(1)
-}
-
 func (m *MockMDS) GetObjectMeta(object *minio.ObjectInfo) error {
 	args := m.Called(object)
 	return args.Error(0)
 }
 
-func (m *MockMDS) DelObjectMeta(bucket, object string) ([]uint64, error) {
+func (m *MockMDS) DelObjectMeta(bucket, object string) error {
 	args := m.Called(bucket, object)
-	return args.Get(0).([]uint64), args.Error(1)
+	return args.Error(0)
 }
 
 func (m *MockMDS) ListObjects(bucket, prefix string) ([]minio.ObjectInfo, error) {
@@ -122,11 +117,6 @@ func (m *MockMDS) GetIncreasedManifestID() (string, error) {
 
 func (m *MockMDS) InitMultipartUpload(uploadID string, objInfo minio.ObjectInfo) error {
 	args := m.Called(uploadID, objInfo)
-	return args.Error(0)
-}
-
-func (m *MockMDS) WriteManifest(manifestid string, manifestList []ChunkInManifest) error {
-	args := m.Called(manifestid, manifestList)
 	return args.Error(0)
 }
 

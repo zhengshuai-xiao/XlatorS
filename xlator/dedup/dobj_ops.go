@@ -647,11 +647,16 @@ func (x *XlatorDedup) readDataObject(backendBucket string, chunks []ChunkInManif
 	return nil
 }
 
-func (x *XlatorDedup) readObject(ctx context.Context, bucket, object string, startOffset, length int64, writer io.Writer, etag string, opts minio.ObjectOptions) (err error) {
+func (x *XlatorDedup) readObject(ctx context.Context, bucket, object string, startOffset, length int64, writer io.Writer, objInfo minio.ObjectInfo, opts minio.ObjectOptions) (err error) {
 	logger.Tracef("readObject enter")
 	backendBucket := GetBackendBucketNameViaBucketName(bucket)
 
-	manifest, err := x.Mdsclient.GetObjectManifest(bucket, object)
+	manifestID, ok := objInfo.UserDefined[ManifestIDKey]
+	if !ok || manifestID == "" {
+		return fmt.Errorf("manifest ID not found for object %s/%s", bucket, object)
+	}
+
+	manifest, err := x.readManifestFromFile(manifestID)
 	if err != nil {
 		logger.Errorf("readObject: failed to get object manifest[%s] err: %s", object, err)
 		return

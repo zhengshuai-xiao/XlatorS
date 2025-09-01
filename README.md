@@ -44,7 +44,7 @@ XlatorS 系统主要由三大核心组件构成：**XlatorS 集群**、**元数�
 
 ![Dedup Xlator 架构](./doc/cn/images/Dedup_design.png "Dedup Xlator 架构")
 
-详细设计可以查看: 
+详细设计可以查看:
 
 ```
 Xlator/doc/cn/Dedup/deduplication.md
@@ -108,7 +108,7 @@ export XL_DEDUP_FASTCDC_MAX_SIZE=262144  # 256KiB
 
 ### 4. 使用示例
 
-你可以通过xlators 提供的简单的weiUI来进行创建/删除 bucket， 上传/下载/删除object
+你可以通过xlators 提供的简单的weiUI来进行创建/删除 bucket， 上传/下载/删除object，注：这个UI使用的minio一个老版本的weiUI，因此功能比较单一
 
 可以通过启动时的提示找到endpoint等相关信息
 
@@ -154,18 +154,28 @@ OPTIONS:
    --chunk-method value  Chunking algorithm to use (FastCDC or FixedCDC) (default: "FastCDC")
    --help, -h            show help
 
-zxiao@localhost:/workspace/X/XlatorS/bin$ ./xc upload --bucket xzs.xzs --local-file /tmp/50dedup200M.data --object-name 50dedup200M.data --disable-multipart true --chunk-method FixedCDC
+zxiao@localhost:/dedup_data$ /workspace/X/XlatorS/bin/xc upload --bucket xzs.xzs --local-file /tmp/50dedup200M.data --object-name 50dedup200M.data  --partSize 10485760 --chunk-method FixedCDC
 File uploaded successfully:
   Bucket:     xzs.xzs
   Object:     50dedup200M.data
   Size:       209715200 bytes
-  ETag:       d41d8cd98f00b204e9800998ecf8427e
-  Time taken: 1.651832857s
-  Throughput: 121.08 MB/s
-zxiao@localhost:/workspace/X/XlatorS/bin$
+  ETag:       2cdd93ba2618005da199dc7b9df57706-20
+  Time taken: 1.181928918s
+  Throughput: 169.21 MB/s
 
 Dedup xlator log:
 2025/08/31 23:38:22.276495 XlatorDedup[5581] <INFO>: Successfully put object xzs.xzs/50dedup200M.data, size: 209715200, wrote: 105971487, dedupRate: 49.47%, ETag: d41d8cd98f00b204e9800998ecf8427e, elapsed: 1.049604225s, throughput: 190.55 MB/s [PutObject@xlator_dedup.go:465]
+
+=================get========================
+zxiao@localhost:/dedup_data$ /workspace/X/XlatorS/bin/xc getaws --bucket xzs.xzs --object-name 50dedup200M.data --local-file /tmp/50dedup200M.data.copy
+SDK 2025/09/01 17:53:53 WARN Response has no supported checksum. Not validating response payload.
+ xzs.xzs/50dedup200M.data has been downloaded to /tmp/50dedup200M.data.copy successfully
+  Size:       209715200 bytes
+  Time taken: 308.97092ms
+  Throughput: 647.31 MB/s
+zxiao@localhost:/dedup_data$ md5sum /tmp/50dedup200M.data /tmp/50dedup200M.data.copy
+f3d1e82711b27546d4b3b3cd6c1de07f  /tmp/50dedup200M.data
+f3d1e82711b27546d4b3b3cd6c1de07f  /tmp/50dedup200M.data.copy
 
 ```
 
@@ -186,4 +196,52 @@ Dedup xlator log:
 
 **注意** : 桶的命名需要遵循 `namespace.bucketname` 的格式，这用于实现基于命名空间的去重隔离。
 
-**我的邮箱：zhengshuai.xiao@outlook.com**
+## 🐳 使用 Docker 运行
+
+项目提供了 `Dockerfile`，可以方便地将 XlatorS 作为容器运行。
+
+### 1. 构建 Docker 镜像
+
+在项目根目录下，运行以下命令构建镜像：
+
+```bash
+docker build -t xlators:latest .
+```
+
+### 2. 运行容器
+
+你需要一个正在运行的 Redis 实例。以下是两种常见的运行模式：
+
+#### 模式一：使用本地 POSIX 文件系统作为后端
+
+这是默认且最简单的模式，数据块将存储在容器内或挂载的本地目录中。
+
+```bash
+docker run -d --name xlators-posix \
+  -p 9000:9000 \
+  -v /path/on/host/dedup_data:/dedup_data \
+  -e "MINIO_ROOT_USER=youruser" \
+  -e "MINIO_ROOT_PASSWORD=yourpassword" \
+  xlators:latest \
+  gateway --address ":9000" --ds-backend posix --meta-addr "your-redis-host:6379/1" --downloadCache /dedup_data/
+```
+
+#### 模式二：使用 S3 兼容存储作为后端
+
+你需要一个正在运行的 MinIO 或其他 S3 兼容服务。
+
+```bash
+docker run -d --name xlators-s3 \
+  -p 9000:9000 \
+  -v /path/on/host/dedup_data:/dedup_data \
+  -e "MINIO_ROOT_USER=youruser" \
+  -e "MINIO_ROOT_PASSWORD=yourpassword" \
+  xlators:latest \
+  gateway --address ":9000" --ds-backend s3 --backend-addr "http://your-s3-host:9001" --meta-addr "your-redis-host:6379/1" --downloadCache /dedup_data/
+```
+
+## 许可证
+
+本项目根据 Apache License 2.0 授权。
+
+**联系我：zhengshuai.xiao@outlook.com**
