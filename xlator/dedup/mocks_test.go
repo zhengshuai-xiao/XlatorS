@@ -160,6 +160,11 @@ func (m *MockMDS) IsDOIDDeleted(namespace string, doid uint64) (bool, error) {
 	return args.Bool(0), args.Error(1)
 }
 
+func (m *MockMDS) NewRedisLock(bucket string, objects ...string) minio.RWLocker {
+	args := m.Called(bucket, objects)
+	return args.Get(0).(minio.RWLocker)
+}
+
 // Implement remaining MDS interface methods...
 func (m *MockMDS) GetAllNamespaces() ([]string, error) {
 	args := m.Called()

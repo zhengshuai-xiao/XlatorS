@@ -21,6 +21,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -803,8 +804,9 @@ func (x *XlatorDedup) GetMultipartInfo(ctx context.Context, bucket, object, uplo
 
 // TODO: add real clock
 func (x *XlatorDedup) NewNSLock(bucket string, objects ...string) minio.RWLocker {
-	logger.Tracef("%s: enter", internal.GetCurrentFuncName())
-	return &internal.StoreFLock{Owner: 123, Readonly: false}
+	logger.Tracef("Creating new distributed lock for bucket: %s, objects: %v", bucket, objects)
+
+	return x.Mdsclient.NewRedisLock(bucket, objects...)
 }
 
 // DeleteObject deletes a blob in bucket
@@ -975,5 +977,69 @@ func (x *XlatorDedup) ListObjects(ctx context.Context, bucket string, prefix str
 	if err != nil {
 		return loi, err
 	}
+	return loi, nil
+}
+
+func (x *XlatorDedup) ListObjectsV2(ctx context.Context, bucket, prefix, continuationToken, delimiter string, maxKeys int, fetchOwner bool, startAfter string) (loi minio.ListObjectsV2Info, err error) {
+	// fetchOwner is not supported and is ignored.
+	logger.Tracef("ListObjectsV2: bucket=%s, prefix=%s, continuationToken=%s, delimiter=%s, maxKeys=%d, startAfter=%s",
+		bucket, prefix, continuationToken, delimiter, maxKeys, startAfter)
+
+	// Get all objects from MDS. This is not ideal for performance with very large buckets
+	// but works with the current MDS interface. A future optimization would be to add
+	// paginated listing to the MDS interface itself.
+	allObjects, err := x.Mdsclient.ListObjects(bucket, prefix)
+	if err != nil {
+		return loi, minio.ErrorRespToObjectError(err, bucket, prefix)
+	}
+
+	// Sort all objects lexicographically to ensure consistent order for pagination.
+	sort.Slice(allObjects, func(i, j int) bool {
+		return allObjects[i].Name < allObjects[j].Name
+	})
+
+	// The V2 API uses either a continuation-token or start-after, but not both.
+	// If a continuation-token is present, it is the marker for the next set of results.
+	marker := continuationToken
+	if marker == "" {
+		marker = startAfter
+	}
+
+	// Find the starting point in our list of all objects.
+	startIdx := 0
+	if marker != "" {
+		// Find the index of the first element that is > marker.
+		startIdx = sort.Search(len(allObjects), func(i int) bool {
+			return allObjects[i].Name > marker
+		})
+	}
+
+	commonPrefixes := make(map[string]struct{})
+	for i := startIdx; i < len(allObjects); i++ {
+		obj := allObjects[i]
+
+		if len(loi.Objects)+len(loi.Prefixes) >= maxKeys {
+			loi.IsTruncated = true
+			loi.NextContinuationToken = obj.Name
+			break
+		}
+
+		if delimiter != "" && strings.HasPrefix(obj.Name, prefix) {
+			remaining := strings.TrimPrefix(obj.Name, prefix)
+			if idx := strings.Index(remaining, delimiter); idx != -1 {
+				commonPrefix := prefix + remaining[:idx+len(delimiter)]
+				if _, ok := commonPrefixes[commonPrefix]; !ok {
+					loi.Prefixes = append(loi.Prefixes, commonPrefix)
+					commonPrefixes[commonPrefix] = struct{}{}
+				}
+				continue
+			}
+		}
+
+		loi.Objects = append(loi.Objects, obj)
+	}
+
+	loi.ContinuationToken = continuationToken
+
 	return loi, nil
 }

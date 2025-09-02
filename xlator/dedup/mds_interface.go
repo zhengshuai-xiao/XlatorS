@@ -46,4 +46,5 @@ type MDS interface {
 	RemoveSpecificDeletedDOIDs(namespace string, doids []uint64) error
 	GetAllNamespaces() ([]string, error)
 	IsDOIDDeleted(namespace string, doid uint64) (bool, error)
+	NewRedisLock(bucket string, objects ...string) minio.RWLocker
 }

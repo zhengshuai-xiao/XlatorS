@@ -196,6 +196,17 @@ f3d1e82711b27546d4b3b3cd6c1de07f  /tmp/50dedup200M.data.copy
 
 **注意** : 桶的命名需要遵循 `namespace.bucketname` 的格式，这用于实现基于命名空间的去重隔离。
 
+## 🧪 自动化端到端测试
+
+项目提供了一个自动化的端到端测试脚本，用于验证整个系统的核心功能。
+
+要运行测试，请确保你已经安装了 `docker` 和 `docker-compose`，然后在项目根目录下执行：
+
+```bash
+cd automation/
+./run_e2e_test.sh
+```
+
 ## 🐳 使用 Docker 运行
 
 项目提供了 `Dockerfile`，可以方便地将 XlatorS 作为容器运行。

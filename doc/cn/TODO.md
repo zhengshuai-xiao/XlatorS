@@ -4,7 +4,8 @@
 
 2.Dependency:
 
-* Redis
+* Redis(too slow for Indexing)
+* **distributed KV Indexing cache**(very important)
 * Object storage(MinIO/AWS S3...)
 * support cluster mode
 
@@ -19,8 +20,10 @@
 
 5.Xlator Cluster
 
-* monitor
+* monitor or leader?
 * self-discovery
+* Docker/k8s
+* NSLock
 
 6.UI
 
