@@ -13,7 +13,7 @@ LDFLAGS = -s -w
 
 # Source files
 MAIN_SRC = main.go
-XC_SRC_DIR = xc
+XC_SRC_DIR = xcli
 
 # Target binaries
 MAIN_BINARY = $(BINARY_DIR)/$(BINARY_NAME)
