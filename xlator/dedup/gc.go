@@ -138,11 +138,14 @@ func (x *XlatorDedup) cleanupNamespace(ctx context.Context, namespace string, ge
 			// 1. Get FPs from data object
 			dobjReader, err := getDataObjectFunc(backendBucket, dobjName, minio.ObjectOptions{})
 			if err != nil {
-				if resp, ok := err.(miniogo.ErrorResponse); ok && resp.Code == "NoSuchKey" {
-					logger.Warnf("GC: data object %s/%s not found in backend. Assuming already deleted.", backendBucket, dobjName)
+				resp, isS3Err := err.(miniogo.ErrorResponse)
+				// If the object is not found (either on S3 or local disk), we can assume it's already been cleaned up.
+				if (isS3Err && resp.Code == "NoSuchKey") || os.IsNotExist(err) {
+					logger.Warnf("GC: data object %s/%s not found. Assuming already deleted.", backendBucket, dobjName)
 					// This DOID can be removed from the GC set.
 					successfullyCleanedDoids = append(successfullyCleanedDoids, doid)
 				} else {
+					// For any other error, log it and retry later.
 					logger.Errorf("GC: failed to get data object %s/%s: %v. Will retry later.", backendBucket, dobjName, err)
 				}
 				continue // Move to the next DOID

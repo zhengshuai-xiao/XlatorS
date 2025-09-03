@@ -216,25 +216,32 @@ cd automation/
 在项目根目录下，运行以下命令构建镜像：
 
 ```bash
-docker build -t xlators:latest .
+docker build -t xlators-app .
 ```
 
 ### 2. 运行容器
 
-你需要一个正在运行的 Redis 实例。以下是两种常见的运行模式：
+首先你需要一个正在运行的 Redis 实例， 以下是两种常见的运行模式：
 
 #### 模式一：使用本地 POSIX 文件系统作为后端
 
 这是默认且最简单的模式，数据块将存储在容器内或挂载的本地目录中。
 
 ```bash
-docker run -d --name xlators-posix \
-  -p 9000:9000 \
-  -v /path/on/host/dedup_data:/dedup_data \
-  -e "MINIO_ROOT_USER=youruser" \
-  -e "MINIO_ROOT_PASSWORD=yourpassword" \
-  xlators:latest \
-  gateway --address ":9000" --ds-backend posix --meta-addr "your-redis-host:6379/1" --downloadCache /dedup_data/
+docker run -d --name xlators-gateway \
+-p 9000:9000  \
+-v "/docker/xlators_data":/xlators_data \
+-v "/docker/xlators_logs":/xlators_log \
+-e "MINIO_ROOT_USER=minio" \
+-e "MINIO_ROOT_PASSWORD=minioadmin"  \
+xlators-app gateway \
+--address ":9000" \
+--xlator "Dedup" \
+--ds-backend "posix" \
+--meta-addr "your-redis:6379/1" \
+--downloadCache "/xlators_data" \
+--loglevel "trace" \
+--logdir "/xlators_log"
 ```
 
 #### 模式二：使用 S3 兼容存储作为后端
@@ -242,13 +249,21 @@ docker run -d --name xlators-posix \
 你需要一个正在运行的 MinIO 或其他 S3 兼容服务。
 
 ```bash
-docker run -d --name xlators-s3 \
-  -p 9000:9000 \
-  -v /path/on/host/dedup_data:/dedup_data \
-  -e "MINIO_ROOT_USER=youruser" \
-  -e "MINIO_ROOT_PASSWORD=yourpassword" \
-  xlators:latest \
-  gateway --address ":9000" --ds-backend s3 --backend-addr "http://your-s3-host:9001" --meta-addr "your-redis-host:6379/1" --downloadCache /dedup_data/
+docker run -d --name xlators-gateway \
+-p 9000:9000  \
+-v "/docker/xlators_data":/xlators_data \
+-v "/docker/xlators_logs":/xlators_log \
+-e "MINIO_ROOT_USER=minio" \
+-e "MINIO_ROOT_PASSWORD=minioadmin"  \
+xlators-app gateway \
+--address ":9000" \
+--xlator "Dedup" \
+--ds-backend "s3" \
+--backend-addr "http://127.0.0.1:9001" #your minIO Endpoint\
+--meta-addr "your-redis:6379/1" \
+--downloadCache "/xlators_data" \
+--loglevel "trace" \
+--logdir "/xlators_log"
 ```
 
 ## 许可证

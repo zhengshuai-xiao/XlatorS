@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -113,7 +114,7 @@ func (x *XlatorDedup) truncateDObj(ctx context.Context, dobj *DObj) (err error) 
 }
 func (x *XlatorDedup) getDobjPathFromLocal(dobj_key string) string {
 	//read data from object
-	return x.dobjCachePath + dobj_key
+	return filepath.Join(x.dobjCachePath, dobj_key)
 }
 func (x *XlatorDedup) newDObj(dobj *DObj) (err error) {
 	doid, err := x.Mdsclient.GetIncreasedDOID()
