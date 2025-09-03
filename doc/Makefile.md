@@ -16,6 +16,7 @@ Here is a list of available targets and their descriptions. You can see this lis
 -   `rebuild`: Cleans the project and then builds all binaries from scratch.
 -   `test`: Runs all unit tests in the project.
 -   `deps`: Runs `go mod tidy` to ensure the `go.mod` file is consistent with the source code.
+-   `docker-build`: Builds the Docker image for the application.
 -   `clean`: Removes all compiled binaries from the `./bin` directory.
 -   `help`: Displays a help message with all available targets and their descriptions.
 

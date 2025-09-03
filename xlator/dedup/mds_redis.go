@@ -980,8 +980,6 @@ func (m *MDSRedis) RemoveReference(namespace string, dataObjectIDs []uint64, obj
 
 // AddDeletedDOIDs adds a list of Data Object IDs to the set of deleted DOIDs for a given namespace.
 // This set is used by a background garbage collection process.
-// The operation is performed within a transaction to ensure atomicity against concurrent operations
-// that might be reading this set (e.g., DedupFPsBatch).
 func (m *MDSRedis) AddDeletedDOIDs(namespace string, doids []uint64) error {
 	if len(doids) == 0 {
 		return nil
@@ -990,21 +988,18 @@ func (m *MDSRedis) AddDeletedDOIDs(namespace string, doids []uint64) error {
 	ctx := context.Background()
 	key := GetDeletedDOIDKey(namespace)
 
-	err := m.Rdb.Watch(ctx, func(tx *redis.Tx) error {
-		// Convert []uint64 to []interface{} for SAdd
-		members := make([]interface{}, len(doids))
-		for i, doid := range doids {
-			members[i] = doid
-		}
+	// Convert []uint64 to []interface{} for SAdd
+	members := make([]interface{}, len(doids))
+	for i, doid := range doids {
+		members[i] = doid
+	}
 
-		pipe := tx.TxPipeline()
-		pipe.SAdd(ctx, key, members...)
-		_, err := pipe.Exec(ctx)
-		return err
-	}, key)
-
+	// SAdd is atomic, so a transaction is not needed. Using WATCH here can cause
+	// race conditions with the GC process that uses SRem on the same key,
+	// leading to unnecessary transaction failures.
+	err := m.Rdb.SAdd(ctx, key, members...).Err()
 	if err != nil {
-		logger.Errorf("AddDeletedDOIDs: transaction failed to add DOIDs to set %s: %v", key, err)
+		logger.Errorf("AddDeletedDOIDs: failed to add DOIDs to set %s: %v", key, err)
 		return err
 	}
 	logger.Tracef("AddDeletedDOIDs: added %d DOIDs to set %s", len(doids), key)

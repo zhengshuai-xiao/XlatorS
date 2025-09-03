@@ -22,7 +22,9 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 
+	rotatelogs "github.com/lestrrat-go/file-rotatelogs"
 	"github.com/sirupsen/logrus"
 )
 
@@ -161,19 +163,25 @@ func DisableLogColor() {
 }
 
 func SetOutFile(name string) {
-	if err := os.MkdirAll(path.Dir(name), 0750); err != nil {
-		logrus.Fatalf("Failed to create log directory for %s: %v", name, err)
-		return
-	}
-	file, err := os.OpenFile(name, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0660)
+	// 使用 file-rotatelogs 实现日志轮转
+	// 这会创建类似 "name.20060102" 的日志文件，并自动创建一个指向最新日志的软链接 "name"
+	logf, err := rotatelogs.New(
+		name+".%Y%m%d",
+		rotatelogs.WithLinkName(name),              // 创建一个软链接到最新的日志文件
+		rotatelogs.WithMaxAge(7*24*time.Hour),      // 最多保留7天的日志
+		rotatelogs.WithRotationTime(24*time.Hour),  // 每天轮转一次
+		rotatelogs.WithRotationSize(100*1024*1024), // 每个文件最大100MB
+	)
+
 	if err != nil {
 		logrus.Fatalf("Failed to open log file %s: %v", name, err)
 		return
 	}
+
 	mu.Lock()
 	defer mu.Unlock()
 	for _, logger := range loggers {
-		logger.SetOutput(file)
+		logger.SetOutput(logf)
 		logger.colorful = false
 	}
 }

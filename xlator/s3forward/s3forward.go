@@ -154,7 +154,7 @@ func (l *s3Objects) GetBucketInfo(ctx context.Context, bucket string) (bi minio.
 
 func (l *s3Objects) NewNSLock(bucket string, objects ...string) minio.RWLocker {
 	logger.Infof("%s: enter", internal.GetCurrentFuncName())
-	return &internal.StoreFLock{Owner: 123, Readonly: false}
+	return &StoreFLock{Owner: 123, Readonly: false}
 }
 
 // ListBuckets lists all S3 buckets

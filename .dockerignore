@@ -1,0 +1,8 @@
+# Git files
+.git
+.gitignore
+
+# Local binaries
+bin/
+automation/
+test/

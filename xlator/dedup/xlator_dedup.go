@@ -173,7 +173,13 @@ func (x *XlatorDedup) Shutdown(ctx context.Context) error {
 	return nil
 }
 
-func (x *XlatorDedup) PutObjectMetadata(ctx context.Context, s string, s2 string, options minio.ObjectOptions) (minio.ObjectInfo, error) {
+func (x *XlatorDedup) PutObjectMetadata(ctx context.Context, bucket, object string, options minio.ObjectOptions) (minio.ObjectInfo, error) {
+	lk := x.NewNSLock(bucket, object)
+	_, err := lk.GetLock(ctx, internal.GlobalOperationTimeout)
+	if err != nil {
+		return minio.ObjectInfo{}, err
+	}
+	defer lk.Unlock()
 	return minio.ObjectInfo{}, minio.NotImplemented{}
 }
 
@@ -326,6 +332,17 @@ func (x *XlatorDedup) PutObject(ctx context.Context, bucket string, object strin
 		logger.Errorf("invalid bucket name format for %s: %v", bucket, err)
 		return
 	}
+
+	if !opts.NoLock {
+		// Lock the object before reading.
+		lk := x.NewNSLock(bucket, object)
+		_, err = lk.GetRLock(ctx, internal.GlobalOperationTimeout)
+		if err != nil {
+			return
+		}
+		defer lk.RUnlock()
+	}
+
 	exist, err := x.Mdsclient.BucketExist(bucket)
 	if err != nil {
 		logger.Errorf("PutObject: failed to check bucket existence: %v", err)
@@ -812,6 +829,16 @@ func (x *XlatorDedup) NewNSLock(bucket string, objects ...string) minio.RWLocker
 // DeleteObject deletes a blob in bucket
 func (x *XlatorDedup) DeleteObject(ctx context.Context, bucket string, object string, opts minio.ObjectOptions) (minio.ObjectInfo, error) {
 	logger.Tracef("%s: enter", internal.GetCurrentFuncName())
+	var err error
+	if !opts.NoLock {
+		// Lock the object before reading.
+		lk := x.NewNSLock(bucket, object)
+		_, err = lk.GetRLock(ctx, internal.GlobalOperationTimeout)
+		if err != nil {
+			return minio.ObjectInfo{}, err
+		}
+		defer lk.RUnlock()
+	}
 
 	// Get object info to retrieve the manifest ID.
 	objInfo, err := x.Mdsclient.GetObjectInfo(bucket, object)
@@ -908,6 +935,16 @@ func (x *XlatorDedup) GetObject(ctx context.Context, bucket, object string, star
 		return minio.ErrorRespToObjectError(minio.InvalidRange{}, bucket, object)
 	}
 
+	// Lock the object before reading.
+	lk := x.NewNSLock(bucket, object)
+	ctx, err = lk.GetRLock(ctx, internal.GlobalOperationTimeout)
+	if err != nil {
+		return err
+	}
+	defer lk.RUnlock()
+
+	opts.NoLock = true
+
 	objInfo, err := x.GetObjectInfo(ctx, bucket, object, opts)
 	if err != nil {
 		return minio.ErrorRespToObjectError(err, bucket, object)
@@ -928,6 +965,16 @@ func (x *XlatorDedup) GetObject(ctx context.Context, bucket, object string, star
 
 func (x *XlatorDedup) GetObjectInfo(ctx context.Context, bucket, object string, opts minio.ObjectOptions) (objInfo minio.ObjectInfo, err error) {
 	logger.Tracef("%s: enter", internal.GetCurrentFuncName())
+	if !opts.NoLock {
+		// Lock the object before reading.
+		lk := x.NewNSLock(bucket, object)
+		_, err = lk.GetRLock(ctx, internal.GlobalOperationTimeout)
+		if err != nil {
+			return
+		}
+		defer lk.RUnlock()
+	}
+
 	objInfo, err = x.Mdsclient.GetObjectInfo(bucket, object)
 	if err != nil {
 		logger.Errorf("GetObjectInfo:failed to GetObjectInfo[%s] err: %s", object, err)
@@ -939,6 +986,17 @@ func (x *XlatorDedup) GetObjectInfo(ctx context.Context, bucket, object string, 
 func (x *XlatorDedup) GetObjectNInfo(ctx context.Context, bucket, object string, rs *minio.HTTPRangeSpec, h http.Header, lockType minio.LockType, opts minio.ObjectOptions) (gr *minio.GetObjectReader, err error) {
 	logger.Tracef("%s: enter:bucket=%s,object=%s", internal.GetCurrentFuncName(), bucket, object)
 	var objInfo minio.ObjectInfo
+
+	// Lock the object before reading.
+	lk := x.NewNSLock(bucket, object)
+	ctx, err = lk.GetRLock(ctx, internal.GlobalOperationTimeout)
+	if err != nil {
+		return nil, err
+	}
+	defer lk.RUnlock()
+
+	opts.NoLock = true
+
 	objInfo, err = x.GetObjectInfo(ctx, bucket, object, opts)
 	if err != nil {
 		logger.Errorf("GetObjectInfo:failed to GetObjectInfo[%s] err: %s", object, err)

@@ -1,4 +1,4 @@
-package internal
+package s3forward
 
 import (
 	"context"
@@ -6,6 +6,7 @@ import (
 	"time"
 
 	minio "github.com/minio/minio/cmd"
+	"github.com/zhengshuai-xiao/XlatorS/internal"
 )
 
 // TODO: this is fake lock, need to implement a real distributed lock
@@ -19,12 +20,12 @@ type StoreFLock struct {
 
 // TODO:should get lock from a lock pool
 func (j *StoreFLock) GetLock(ctx context.Context, timeout *minio.DynamicTimeout) (newCtx context.Context, timedOutErr error) {
-	logger.Infof("%s: enter", GetCurrentFuncName())
-	return j.getFlockWithTimeOut(ctx, F_WRLCK, timeout)
+	logger.Infof("%s: enter", internal.GetCurrentFuncName())
+	return j.getFlockWithTimeOut(ctx, internal.F_WRLCK, timeout)
 }
 
 func (j *StoreFLock) getFlockWithTimeOut(ctx context.Context, ltype uint32, timeout *minio.DynamicTimeout) (context.Context, error) {
-	logger.Infof("%s: enter", GetCurrentFuncName())
+	logger.Infof("%s: enter", internal.GetCurrentFuncName())
 	if j.Readonly {
 		return ctx, nil
 	}
@@ -35,7 +36,7 @@ func (j *StoreFLock) getFlockWithTimeOut(ctx context.Context, ltype uint32, time
 	var getLockFunc func() bool
 	//var unlockFunc func()
 	var getLock bool
-	if ltype == F_RDLCK {
+	if ltype == internal.F_RDLCK {
 		getLockFunc = j.localLock.TryRLock
 		//unlockFunc = j.localLock.RUnlock
 		lockStr = "read"
@@ -79,7 +80,7 @@ func (j *StoreFLock) getFlockWithTimeOut(ctx context.Context, ltype uint32, time
 }
 
 func (j *StoreFLock) Unlock() {
-	logger.Infof("%s: enter", GetCurrentFuncName())
+	logger.Infof("%s: enter", internal.GetCurrentFuncName())
 	if j.Readonly {
 		return
 	}
@@ -90,12 +91,12 @@ func (j *StoreFLock) Unlock() {
 }
 
 func (j *StoreFLock) GetRLock(ctx context.Context, timeout *minio.DynamicTimeout) (newCtx context.Context, timedOutErr error) {
-	logger.Infof("%s: enter", GetCurrentFuncName())
-	return j.getFlockWithTimeOut(ctx, F_RDLCK, timeout)
+	logger.Infof("%s: enter", internal.GetCurrentFuncName())
+	return j.getFlockWithTimeOut(ctx, internal.F_RDLCK, timeout)
 }
 
 func (j *StoreFLock) RUnlock() {
-	logger.Infof("%s: enter", GetCurrentFuncName())
+	logger.Infof("%s: enter", internal.GetCurrentFuncName())
 	if j.Readonly {
 		return
 	}
@@ -121,7 +122,7 @@ type StoreRWLocker struct {
 }
 
 func (l *StoreRWLocker) GetLock(ctx context.Context, timeout *DynamicTimeout) (context.Context, error) {
-	logger.Infof("%s: enter", GetCurrentFuncName())
+	logger.Infof("%s: enter", internal.GetCurrentFuncName())
 	var ctxWithTimeout context.Context
 	var cancel context.CancelFunc
 
@@ -147,12 +148,12 @@ func (l *StoreRWLocker) GetLock(ctx context.Context, timeout *DynamicTimeout) (c
 }
 
 func (l *StoreRWLocker) Unlock() {
-	logger.Infof("%s: enter", GetCurrentFuncName())
+	logger.Infof("%s: enter", internal.GetCurrentFuncName())
 	l.mu.Unlock()
 }
 
 func (l *StoreRWLocker) GetRLock(ctx context.Context, timeout *DynamicTimeout) (context.Context, error) {
-	logger.Infof("%s: enter", GetCurrentFuncName())
+	logger.Infof("%s: enter", internal.GetCurrentFuncName())
 
 	var ctxWithTimeout context.Context
 	var cancel context.CancelFunc
@@ -179,6 +180,6 @@ func (l *StoreRWLocker) GetRLock(ctx context.Context, timeout *DynamicTimeout) (
 }
 
 func (l *StoreRWLocker) RUnlock() {
-	logger.Infof("%s: enter", GetCurrentFuncName())
+	logger.Infof("%s: enter", internal.GetCurrentFuncName())
 	l.mu.RUnlock()
 }

@@ -3,7 +3,7 @@ GOCMD=go
 GOBUILD=$(GOCMD) build
 GOCLEAN=$(GOCMD) clean
 GOTEST=$(GOCMD) test
-GOMOD=$(GOMOD) tidy
+GOMOD=$(GOCMD) mod
 GORUN=$(GOMOD) run
 
 # Project variables
@@ -21,6 +21,11 @@ XC_BINARY = $(BINARY_DIR)/xc
 
 ALL_BINARIES = $(MAIN_BINARY) $(XC_BINARY)
 
+# Docker parameters
+DOCKER_CMD=docker
+DOCKER_IMAGE_NAME=xlators-app
+DOCKER_TAG=latest
+
 # Default target
 all: build
 
@@ -30,6 +35,11 @@ all: build
 # Build targets
 build: $(ALL_BINARIES) ## Build all binaries for release
 
+# Build the Docker image
+docker-build: build
+	@echo "Building Docker image $(DOCKER_IMAGE_NAME):$(DOCKER_TAG)..."
+	$(DOCKER_CMD) build -t $(DOCKER_IMAGE_NAME):$(DOCKER_TAG) .
+	
 dbuild: ## Build all binaries for debug
 	@echo "--> Building debug binaries..."
 	@mkdir -p $(BINARY_DIR)
@@ -67,3 +77,5 @@ help: ## Show this help message
 	@echo ""
 	@echo "Targets:"
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
+
+.PHONY: all build docker-build dbuild rebuild test deps clean help 
