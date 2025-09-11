@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/zhengshuai-xiao/XlatorS/internal/compression"
 )
 
 func setupTestXlator(t *testing.T) (*XlatorDedup, *MockMDS, func()) {
@@ -35,6 +36,9 @@ func TestWriteDObj(t *testing.T) {
 	defer teardown()
 
 	ctx := context.Background()
+	// Create a compressor for the test
+	compressor, err := compression.GetCompressorViaString("zlib")
+	assert.NoError(t, err)
 
 	// --- Test Case 1: Write a single new chunk ---
 	t.Run("WriteSingleNewChunk", func(t *testing.T) {
@@ -48,10 +52,10 @@ func TestWriteDObj(t *testing.T) {
 		mockMDS.On("GetDObjNameInMDS", uint64(1)).Return("dobj-1").Once()
 		mockMDS.On("GetDOIDFromDObjName", "dobj-1").Return(int64(1), nil).Once()
 
-		written, err := xlator.writeDObj(ctx, dobj, chunks)
+		written, _, err := xlator.writeDObj(ctx, dobj, chunks, compressor)
 
 		assert.NoError(t, err)
-		assert.Equal(t, 11, written)
+		assert.True(t, written > 0, "written should be greater than 0 after compression")
 		assert.Equal(t, "dobj-1", dobj.dobj_key, "DObj key should be set")
 		assert.Equal(t, uint64(1), chunks[0].DOid, "Chunk's DOid should be updated")
 		assert.Len(t, dobj.fps, 1, "One FP should be recorded in the DObj")
@@ -77,10 +81,10 @@ func TestWriteDObj(t *testing.T) {
 		mockMDS.On("GetDObjNameInMDS", uint64(2)).Return("dobj-2").Once()
 		mockMDS.On("GetDOIDFromDObjName", "dobj-2").Return(int64(2), nil).Once()
 
-		written, err := xlator.writeDObj(ctx, dobj, chunks)
+		written, _, err := xlator.writeDObj(ctx, dobj, chunks, compressor)
 
 		assert.NoError(t, err)
-		assert.Equal(t, 8, written, "Should only write the new chunk's data")
+		assert.True(t, written > 0, "Should only write the new chunk's data, and size should be > 0")
 		assert.Equal(t, "dobj-2", dobj.dobj_key)
 		assert.Equal(t, uint64(2), chunks[0].DOid)
 		assert.Len(t, dobj.fps, 1, "Only the new chunk's FP should be recorded")

@@ -25,6 +25,7 @@ import (
 	miniogo "github.com/minio/minio-go/v7"
 	minio "github.com/minio/minio/cmd"
 	"github.com/zhengshuai-xiao/XlatorS/internal"
+	"github.com/zhengshuai-xiao/XlatorS/internal/compression"
 	S3client "github.com/zhengshuai-xiao/XlatorS/pkg/s3client"
 )
 
@@ -41,9 +42,11 @@ var buffPool = sync.Pool{
 }
 
 type fpinDObj struct {
-	FP     [32]byte
-	Offset uint64
-	Len    uint64
+	FP           [32]byte
+	Offset       uint64
+	Len          uint64
+	CRC          uint32
+	CompressType byte
 }
 
 type DObj struct {
@@ -137,15 +140,15 @@ func (x *XlatorDedup) newDObj(dobj *DObj) (err error) {
 	return nil
 }
 
-func (x *XlatorDedup) writeDObj(ctx context.Context, dobj *DObj, chunks []Chunk) (int, error) {
-	var writenLen int = 0
-	var err error
+func (x *XlatorDedup) writeDObj(ctx context.Context, dobj *DObj, chunks []Chunk, compressor compression.Compressor) (writenLen int, compressedLen int, err error) {
+	writenLen = 0
+	compressedLen = 0
 	//for the first time, why put here, because I want to make sure there is something to write
 	//just in case creating a null DObj file
 	if dobj.dobj_key == "" {
 		err = x.newDObj(dobj)
 		if err != nil {
-			return 0, err
+			return 0, 0, err
 		}
 	}
 	// A short-lived cache to handle duplicates within this single batch of chunks.
@@ -167,23 +170,35 @@ func (x *XlatorDedup) writeDObj(ctx context.Context, dobj *DObj, chunks []Chunk)
 		if dobj.dob_offset+uint64(chunks[i].Len) >= maxSize {
 			err = x.truncateDObj(ctx, dobj)
 			if err != nil {
-				return 0, err
+				return 0, 0, err
 			}
 
 			err = x.newDObj(dobj)
 			if err != nil {
-				return 0, err
+				return 0, 0, err
 			}
 		}
-
-		len, err := internal.WriteAll(dobj.filer, chunks[i].Data)
+		//do compression
+		compressedData, err := compressor.Compress(chunks[i].Data)
 		if err != nil {
-			return 0, err
+			return 0, 0, err
 		}
-		writenLen += len
+
+		compressedLen += (len(chunks[i].Data) - len(compressedData))
+		chunks[i].Data = compressedData
+		chunks[i].Len = uint64(len(compressedData))
+
+		wlen, err := internal.WriteAll(dobj.filer, chunks[i].Data)
+		if err != nil {
+			return 0, 0, err
+		}
+		if wlen != len(chunks[i].Data) {
+			return 0, 0, fmt.Errorf("failed to write all data(total len: %d, wlen: %d) to file", len(chunks[i].Data), wlen)
+		}
+		writenLen += wlen
 		doid, err := x.Mdsclient.GetDOIDFromDObjName(dobj.dobj_key)
 		if err != nil {
-			return 0, err
+			return 0, 0, err
 		}
 		chunks[i].DOid = uint64(doid)
 		//chunks[i].OffInDOid = dobj.dob_offset
@@ -192,21 +207,25 @@ func (x *XlatorDedup) writeDObj(ctx context.Context, dobj *DObj, chunks []Chunk)
 		// Cache the FP and its newly assigned DOid for this batch.
 		batchFPCache[chunks[i].FP] = chunks[i].DOid
 		fp := fpinDObj{
-			Offset: dobj.dob_offset,
-			Len:    chunks[i].Len,
+			Offset:       dobj.dob_offset,
+			Len:          chunks[i].Len,
+			CRC:          0, //TODO;
+			CompressType: byte(compressor.Type()),
 		}
+
 		copy(fp.FP[:], chunks[i].FP[:])
 		dobj.fps = append(dobj.fps, fp)
 
 		dobj.dob_offset += uint64(chunks[i].Len)
 
 	}
-	return writenLen, err
+	return
 }
 
 func (x *XlatorDedup) writeObj(ctx context.Context, ns string, r *minio.PutObjReader, objInfo *minio.ObjectInfo, localFPCache map[string]uint64) (manifestList []ChunkInManifest, err error) {
 	var totalSize int64 = 0
 	var totalWriteSize int64 = 0
+	var totalCompressedSize int64 = 0
 	start := time.Now()
 
 	// Determine chunking algorithm based on user tags.
@@ -214,6 +233,11 @@ func (x *XlatorDedup) writeObj(ctx context.Context, ns string, r *minio.PutObjRe
 	chunker, err := cdc.NewChunker(r)
 	if err != nil {
 		logger.Errorf("writeObj: failed to create chunker: %s", err)
+		return nil, err
+	}
+	//get the compressor, zlib is the default
+	compressor, err := compression.GetCompressorViaString("zlib")
+	if err != nil {
 		return nil, err
 	}
 
@@ -279,12 +303,13 @@ func (x *XlatorDedup) writeObj(ctx context.Context, ns string, r *minio.PutObjRe
 			}
 
 			//write data
-			n, writeErr := x.writeDObj(ctx, dobj, chunks)
+			n, compressedLen, writeErr := x.writeDObj(ctx, dobj, chunks, compressor)
 			if writeErr != nil {
 				logger.Errorf("writeObj: failed to writeDObj: %s", writeErr)
 				return nil, writeErr
 			}
 			totalWriteSize += int64(n)
+			totalCompressedSize += int64(compressedLen)
 
 			// Update local cache with newly written chunks for intra-object dedup.
 			for i := range chunks {
@@ -319,14 +344,17 @@ func (x *XlatorDedup) writeObj(ctx context.Context, ns string, r *minio.PutObjRe
 	objInfo.Size = totalSize
 	if totalSize > 0 {
 		dedupRate := float64(totalSize-totalWriteSize) / float64(totalSize)
+		compressedRate := float64(totalCompressedSize) * 100 / float64(totalSize)
 		objInfo.UserDefined["wroteSize"] = fmt.Sprintf("%d", totalWriteSize)
 		objInfo.UserDefined["dedupRate"] = fmt.Sprintf("%.2f%%", dedupRate*100)
+		objInfo.UserDefined["compressedRate"] = fmt.Sprintf("%.2f%%", compressedRate)
 	} else {
 		objInfo.UserDefined["wroteSize"] = "0"
 		objInfo.UserDefined["dedupRate"] = "0.00%"
+		objInfo.UserDefined["compressedRate"] = "0.00%"
 	}
-	logger.Infof("writeObj: processed size: %d, wrote: %d, dedupRate: %s, elapsed: %s",
-		totalSize, totalWriteSize, objInfo.UserDefined["dedupRate"], time.Since(start))
+	logger.Infof("writeObj: processed size: %d, wrote: %d, dedupRate: %s, totalCompressedSize:%d, elapsed: %s",
+		totalSize, totalWriteSize, objInfo.UserDefined["dedupRate"], totalCompressedSize, time.Since(start))
 
 	return manifestList, nil
 }
@@ -339,6 +367,12 @@ func (x *XlatorDedup) writePart(ctx context.Context, ns string, r *minio.PutObjR
 	chunker, err := cdc.NewChunker(r)
 	if err != nil {
 		logger.Errorf("writePart: failed to create chunker: %s", err)
+		return 0, 0, nil, err
+	}
+
+	//get the compressor, zlib is the default
+	compressor, err := compression.GetCompressorViaString("zlib")
+	if err != nil {
 		return 0, 0, nil, err
 	}
 
@@ -400,7 +434,7 @@ func (x *XlatorDedup) writePart(ctx context.Context, ns string, r *minio.PutObjR
 				}
 			}
 
-			written, writeErr := x.writeDObj(ctx, dobj, chunks)
+			written, _, writeErr := x.writeDObj(ctx, dobj, chunks, compressor)
 			if writeErr != nil {
 				logger.Errorf("writePart: failed to writeDObj: %s", writeErr)
 				return 0, 0, nil, writeErr
@@ -629,14 +663,33 @@ func (x *XlatorDedup) readDataObject(backendBucket string, chunks []ChunkInManif
 			return err
 		}
 
-		// Copy the required number of bytes from the data object file to the writer.
-		n, err := io.CopyN(writer, dobjReader.filer, bytesToReadInChunk)
+		buffer := make([]byte, fpinDObj.Len)
+		dobjReader.filer.Read(buffer)
+		//decompress
+		compressor, err := compression.GetCompressorViaType(compression.CompressionType(fpinDObj.CompressType))
 		if err != nil {
-			logger.Errorf("readDataObject: failed to copy from file %s: %v", dobjReader.path, err)
+			logger.Errorf("readDataObject: failed to get compressor: %v", err)
+			return err
+		}
+		decompressbuf, err := compressor.Decompress(buffer)
+		if err != nil {
+			logger.Errorf("readDataObject: failed to decompress: %v", err)
 			return err
 		}
 
-		totalBytesWritten += n
+		// Copy the required number of bytes from the data object file to the writer.
+		//n, err := io.Copy(writer, decompressbuf)
+		n, err := writer.Write(decompressbuf)
+		if err != nil {
+			logger.Errorf("readDataObject: failed to Write decompressed buf %s: %v", dobjReader.path, err)
+			return err
+		}
+		if n != len(decompressbuf) {
+			logger.Errorf("failed to write all data(%d) to writer(%d)", len(decompressbuf), n)
+			return err
+		}
+
+		totalBytesWritten += int64(n)
 		currentObjectOffset += chunkLen
 	}
 

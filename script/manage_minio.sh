@@ -9,11 +9,11 @@
 # #############################################################################
 
 # --- MinIO Configuration ---
-MINIO_ROOT_USER="minio"
-MINIO_ROOT_PASSWORD="minioadmin"
-MINIO_DATA_DIR="/data"
-MINIO_BINARY="/workspace/minio/minio"
-MINIO_ADDRESS="127.0.0.1:9001"
+MINIO_ROOT_USER=${MINIO_ROOT_USER:-"minio"}
+MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-"minioadmin"}
+MINIO_DATA_DIR=${MINIO_DATA_DIR:-"/data"}
+MINIO_BINARY=${MINIO_BINARY:-"/workspace/minio/minio"}
+MINIO_ADDRESS=${MINIO_ADDRESS:-"127.0.0.1:9001"}
 
 # --- Functions ---
 
@@ -37,14 +37,25 @@ start_minio() {
     # Start MinIO as a background process
     nohup ${MINIO_BINARY} server --address ${MINIO_ADDRESS} "$MINIO_DATA_DIR" > /dev/null 2>&1 &
 
-    # Check if MinIO started successfully
-    sleep 3
+    # Wait for MinIO to be ready by polling its health check endpoint
+    echo "Waiting for MinIO to start..."
+    local retries=10
+    local wait_seconds=2
+    for ((i=0; i<retries; i++)); do
+        # Use curl to check the health endpoint. The /minio/health/live is standard.
+        if curl -s -o /dev/null "http://${MINIO_ADDRESS}/minio/health/live"; then
+            echo "MinIO started successfully."
+            return 0
+        fi
+        sleep ${wait_seconds}
+    done
+
+    echo "Failed to start MinIO after $((retries * wait_seconds)) seconds."
+    # Try to kill the process if it started but is not healthy
     if pgrep -f "minio server" > /dev/null; then
-        echo "MinIO started successfully."
-    else
-        echo "Failed to start MinIO."
-        return 1
+        pkill -f "minio server"
     fi
+    return 1
 }
 
 stop_minio() {

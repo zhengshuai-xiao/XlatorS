@@ -50,13 +50,13 @@ export XL_DEDUP_FASTCDC_MAX_SIZE=262144  # 256KiB
 
 # 4. Define service parameters
 BINARY="${SCRIPT_DIR}/../bin/xlators"
-XLATOR_TYPE="Dedup"
-LISTEN_ADDR="127.0.0.1:9000"
-META_ADDR="127.0.0.1:6379/1" # Redis address
-LOG_LEVEL="trace"
-LOG_DIR="/var/log/xlator/"
-DOWNLOAD_CACHE="/dedup_data" # Local cache for data objects
-S3_BACKEND_ADDR="http://127.0.0.1:9001"   # Address of the backend S3 storage
+XLATOR_TYPE=${XLATOR_TYPE:-"Dedup"}
+LISTEN_ADDR=${LISTEN_ADDR:-"127.0.0.1:9000"}
+META_ADDR=${META_ADDR:-"127.0.0.1:6379/1"} # Redis address
+LOG_LEVEL=${LOG_LEVEL:-"trace"}
+LOG_DIR=${LOG_DIR:-"/var/log/xlator/"}
+DOWNLOAD_CACHE=${DOWNLOAD_CACHE:-"/dedup_data"} # Local cache for data objects
+S3_BACKEND_ADDR=${S3_BACKEND_ADDR:-"http://127.0.0.1:9001"}   # Address of the backend S3 storage
 
 # --- Pre-run Checks and Setup -----
 : '
@@ -98,32 +98,39 @@ mkdir -p "$DOWNLOAD_CACHE"
 
 # --- Build and Execute Command ---
 
-BASE_CMD="$BINARY gateway \
-    --address $LISTEN_ADDR \
-    --xlator $XLATOR_TYPE \
-    --meta-addr $META_ADDR \
-    --loglevel $LOG_LEVEL \
-    --downloadCache $DOWNLOAD_CACHE"
-#    --logdir $LOG_DIR \
+# Use an array to build the command safely, avoiding issues with spaces and special characters.
+BASE_CMD_ARRAY=(
+    "$BINARY"
+    "gateway"
+    "--address" "$LISTEN_ADDR"
+    "--xlator" "$XLATOR_TYPE"
+    "--meta-addr" "$META_ADDR"
+    "--loglevel" "$LOG_LEVEL"
+    "--downloadCache" "$DOWNLOAD_CACHE"
+    # "--logdir" "$LOG_DIR" # Uncomment if you want to use this feature
+)
+
 echo "Starting XlatorS Dedup Gateway..."
 
 start_redis
 
+FINAL_CMD_ARRAY=()
 if [ "$BACKEND_TYPE" == "posix" ]; then
-    FINAL_CMD="$BASE_CMD --ds-backend posix"
+    FINAL_CMD_ARRAY=("${BASE_CMD_ARRAY[@]}" "--ds-backend" "posix")
 elif [ "$BACKEND_TYPE" == "s3" ]; then
     start_minio
-    FINAL_CMD="$BASE_CMD --ds-backend s3 --backend-addr $S3_BACKEND_ADDR"
+    FINAL_CMD_ARRAY=("${BASE_CMD_ARRAY[@]}" "--ds-backend" "s3" "--backend-addr" "$S3_BACKEND_ADDR")
 else
     echo "Error: Invalid backend type '$BACKEND_TYPE'."
     usage
 fi
 
 echo "---------------------------------"
-echo "Executing command:"
-echo "$FINAL_CMD"
+echo "Executing command array:"
+# Use printf to safely quote and display the command array elements
+printf "%q " "${FINAL_CMD_ARRAY[@]}"
+echo ""
 echo "---------------------------------"
 
 # Execute the final command
-
-eval $FINAL_CMD
+exec "${FINAL_CMD_ARRAY[@]}"

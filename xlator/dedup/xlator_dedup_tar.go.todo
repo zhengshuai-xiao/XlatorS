@@ -1,0 +1,213 @@
+package dedup
+
+import (
+	"archive/tar"
+	"bytes"
+	"context"
+	"encoding/json"
+	"io"
+	"strings"
+
+	"github.com/minio/minio-go/v7"
+)
+
+const (
+	// User metadata key to identify tar format uploads.
+	TarFormatMetadataKey = "X-Amz-Meta-Format"
+	// Suffix for the object storing concatenated file data.
+	TarDataSuffix = ".DATA"
+	// Suffix for the object storing tar metadata manifest.
+	TarHeaderSuffix = ".HDR"
+)
+
+// TarFileHeader holds metadata for a single file within a tar archive.
+// It includes the original tar header and its offset within the combined DATA object.
+type TarFileHeader struct {
+	Header *tar.Header `json:"header"`
+	Offset int64       `json:"offset"`
+}
+
+// TarManifest represents the metadata for the entire tar archive,
+// stored in the .HDR object.
+type TarManifest struct {
+	Files []TarFileHeader `json:"files"`
+}
+
+type TarStream struct {
+	// xlator is a reference to the main XlatorDedup struct,
+	// allowing access to its methods for data operations.
+	xlator *XlatorDedup
+	// bucket and object are the S3 bucket and object names for the tar archive.
+	bucket string
+	object string
+	// dataObjectInfo holds the ObjectInfo for the .DATA object.
+	dataObjectInfo minio.ObjectInfo
+	// manifest is the parsed TarManifest for the tar archive.
+	manifest *TarManifest
+	// currentFileIndex tracks which file in the manifest is currently being read.
+	currentFileIndex int
+	// currentDataReader is the reader for the current file's data from the .DATA object.
+	currentDataReader io.ReadCloser
+}
+
+// ToJSON serializes the manifest to a JSON byte slice.
+func (m *TarManifest) ToJSON() ([]byte, error) {
+	return json.Marshal(m)
+}
+
+// NewTarManifestFromJSON deserializes a JSON byte slice into a manifest.
+func NewTarManifestFromJSON(data []byte) (*TarManifest, error) {
+	var m TarManifest
+	err := json.Unmarshal(data, &m)
+	if err != nil {
+		return nil, err
+	}
+	return &m, nil
+}
+
+// handleTarStreamPut processes an incoming tar stream for a PutObject operation.
+// It splits the tar stream into a .DATA object (for deduplication) and a .HDR object (metadata).
+//
+// NOTE: This is a conceptual implementation. You need to adapt it to your xlator's
+// internal APIs for writing objects (e.g., `newDedupWriter`, `storage.PutObject`).
+func (d *xlator) handleTarStreamPut(ctx context.Context, bucket, object string, r io.Reader, opts minio.PutObjectOptions) (minio.UploadInfo, error) {
+	// Assume newDedupWriter is a method that returns a writer that handles deduplication.
+	// This writer will process the concatenated data of all files in the tar.
+	dataWriter, err := d.newDedupWriter(ctx, bucket, object+TarDataSuffix, opts)
+	if err != nil {
+		return minio.UploadInfo{}, err
+	}
+	defer dataWriter.Close()
+
+	tarReader := tar.NewReader(r)
+	manifest := TarManifest{Files: []TarFileHeader{}}
+	var currentOffset int64 = 0
+
+	// 1. Read the tar stream file by file.
+	for {
+		header, err := tarReader.Next()
+		if err == io.EOF {
+			break // End of tar archive.
+		}
+		if err != nil {
+			return minio.UploadInfo{}, err
+		}
+
+		// Store header and current offset.
+		fileMeta := TarFileHeader{
+			Header: header,
+			Offset: currentOffset,
+		}
+		manifest.Files = append(manifest.Files, fileMeta)
+
+		// 2. Write file content to the .DATA stream for deduplication.
+		if header.Typeflag == tar.TypeReg {
+			written, err := io.Copy(dataWriter, tarReader)
+			if err != nil {
+				return minio.UploadInfo{}, err
+			}
+			currentOffset += written
+		}
+	}
+
+	// 3. Finalize the .DATA object.
+	// The dedup writer's Close() method should finalize the object and return its metadata.
+	dataUploadInfo, err := dataWriter.Close()
+	if err != nil {
+		return minio.UploadInfo{}, err
+	}
+
+	// 4. Serialize and write the .HDR manifest object.
+	hdrBytes, err := manifest.ToJSON()
+	if err != nil {
+		return minio.UploadInfo{}, err
+	}
+
+	hdrOpts := minio.PutObjectOptions{
+		ContentType: "application/json",
+	}
+	// Use the underlying storage directly to bypass deduplication for the header object.
+	// This assumes `d.storage` is your backend storage client.
+	_, err = d.storage.PutObject(ctx, bucket, object+TarHeaderSuffix, bytes.NewReader(hdrBytes), int64(len(hdrBytes)), hdrOpts)
+	if err != nil {
+		// Here you might need cleanup logic for the already written .DATA object.
+		return minio.UploadInfo{}, err
+	}
+
+	// 5. Create/update the metadata for the original object to act as a manifest.
+	// This metadata should indicate that it's a tar archive and point to the .DATA and .HDR objects.
+	// The implementation depends on how your metadata engine works.
+	// For example, you could store a small JSON object for the original object key.
+	originalObjectMeta := map[string]string{
+		"type": "tar-archive",
+		"data": object + TarDataSuffix,
+		"hdr":  object + TarHeaderSuffix,
+		"etag": dataUploadInfo.ETag, // Use the ETag of the data part.
+	}
+	// ... code to save originalObjectMeta to your metadata store ...
+
+	return dataUploadInfo, nil
+}
+
+// handleTarStreamGet reconstructs and streams the entire tar archive.
+//
+// NOTE: This is a conceptual implementation.
+func (d *xlator) handleTarStreamGet(ctx context.Context, bucket, object string, w io.Writer, opts minio.GetObjectOptions) error {
+	// 1. Fetch and parse the .HDR manifest.
+	// This assumes `d.storage` is your backend storage client.
+	hdrObject, err := d.storage.GetObject(ctx, bucket, object+TarHeaderSuffix, minio.GetObjectOptions{})
+	if err != nil {
+		return err
+	}
+	defer hdrObject.Close()
+
+	hdrBytes, err := io.ReadAll(hdrObject)
+	if err != nil {
+		return err
+	}
+
+	manifest, err := NewTarManifestFromJSON(hdrBytes)
+	if err != nil {
+		return err
+	}
+
+	// 2. Create a tar writer to stream the response.
+	tarWriter := tar.NewWriter(w)
+	defer tarWriter.Close()
+
+	// 3. Iterate through files in the manifest and reconstruct the tar stream.
+	for _, fileMeta := range manifest.Files {
+		// Write the file header.
+		if err := tarWriter.WriteHeader(fileMeta.Header); err != nil {
+			return err
+		}
+
+		// If it's a regular file, fetch its data from the .DATA object and write it.
+		if fileMeta.Header.Typeflag == tar.TypeReg && fileMeta.Header.Size > 0 {
+			// Get a reader for the specific data range from the .DATA object.
+			// This requires a GetObject call with a range option.
+			rangeOpts := minio.GetObjectOptions{}
+			rangeOpts.SetRange(fileMeta.Offset, fileMeta.Offset+fileMeta.Header.Size-1)
+
+			// Use the xlator's GetObject to benefit from caching and other layers.
+			dataObject, err := d.GetObject(ctx, bucket, object+TarDataSuffix, rangeOpts)
+			if err != nil {
+				return err
+			}
+
+			// Stream the data into the tar writer.
+			if _, err := io.Copy(tarWriter, dataObject); err != nil {
+				dataObject.Close()
+				return err
+			}
+			dataObject.Close()
+		}
+	}
+
+	return nil
+}
+
+// isTarUpload checks if the PutObject request is for a tar file.
+func isTarUpload(opts minio.PutObjectOptions) bool {
+	return strings.ToLower(opts.UserMetadata[TarFormatMetadataKey]) == "tar"
+}

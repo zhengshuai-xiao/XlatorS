@@ -488,8 +488,8 @@ func (x *XlatorDedup) PutObject(ctx context.Context, bucket string, object strin
 	if elapsed.Seconds() > 0 {
 		throughput = float64(objInfo.Size) / (1024 * 1024) / elapsed.Seconds()
 	}
-	logger.Infof("Successfully put object %s/%s, size: %d, wrote: %s, dedupRate: %s, ETag: %s, elapsed: %s, throughput: %.2f MB/s",
-		bucket, object, objInfo.Size, objInfo.UserDefined["wroteSize"], objInfo.UserDefined["dedupRate"], objInfo.ETag, elapsed, throughput)
+	logger.Infof("Successfully put object %s/%s, size: %d, wrote: %s, dedupRate: %s, compressRate: %s, ETag: %s, elapsed: %s, throughput: %.2f MB/s",
+		bucket, object, objInfo.Size, objInfo.UserDefined["wroteSize"], objInfo.UserDefined["dedupRate"], objInfo.UserDefined["compressedRate"], objInfo.ETag, elapsed, throughput)
 	return objInfo, nil
 }
 

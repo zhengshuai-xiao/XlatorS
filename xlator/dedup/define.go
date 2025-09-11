@@ -32,7 +32,6 @@ type ChunkInManifest struct {
 	DOid uint64
 	//OffInDOid uint64
 	//LenInDOid uint64
-
 }
 
 type FPValInMDS struct {
