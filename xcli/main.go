@@ -9,8 +9,9 @@ import (
 
 func main() {
 	app := &cli.App{
-		Name:  "xcli",
-		Usage: "A simple S3 client and admin tool for XlatorS",
+		Name:                 "xcli",
+		Usage:                "A simple S3 client and admin tool for XlatorS",
+		EnableBashCompletion: true,
 		Flags: []cli.Flag{
 			&cli.StringFlag{
 				Name:    "endpoint",
@@ -40,10 +41,12 @@ func main() {
 			makeBucketCmd(),
 			removeBucketCmd(),
 			uploadCmd(),
+			backupCmd(),
+			restoreCmd(),
 			downloadCmd(),
 			deleteCmd(),
 			gcTriggerCmd(),
-			getAWSCmd(),
+			listBackupCmd(),
 		},
 	}
 

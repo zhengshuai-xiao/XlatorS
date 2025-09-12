@@ -13,7 +13,7 @@ import (
 
 const (
 	// User metadata key to identify tar format uploads.
-	TarFormatMetadataKey = "X-Amz-Meta-Format"
+	FormatMetadataKey = "X-Amz-Meta-Format"
 	// Suffix for the object storing concatenated file data.
 	TarDataSuffix = ".DATA"
 	// Suffix for the object storing tar metadata manifest.
@@ -209,5 +209,5 @@ func (d *xlator) handleTarStreamGet(ctx context.Context, bucket, object string, 
 
 // isTarUpload checks if the PutObject request is for a tar file.
 func isTarUpload(opts minio.PutObjectOptions) bool {
-	return strings.ToLower(opts.UserMetadata[TarFormatMetadataKey]) == "tar"
+	return strings.ToLower(opts.UserMetadata[FormatMetadataKey]) == "tar"
 }
