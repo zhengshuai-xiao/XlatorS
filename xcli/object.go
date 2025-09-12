@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/minio/minio-go/v7"
-	"github.com/minio/minio-go/v7/pkg/credentials"
 	"github.com/urfave/cli/v2"
 )
 
@@ -21,10 +20,6 @@ func uploadCmd() *cli.Command {
 		Name:  "upload",
 		Usage: "Upload a local file to MinIO/XlatorS",
 		Flags: []cli.Flag{
-			&cli.StringFlag{Name: "endpoint", Value: "localhost:9000", Usage: "MinIO server endpoint"},
-			&cli.StringFlag{Name: "access-key", Value: "minio", Usage: "MinIO access key"},
-			&cli.StringFlag{Name: "secret-key", Value: "minioadmin", Usage: "MinIO secret key"},
-			&cli.BoolFlag{Name: "ssl", Usage: "Use SSL for connection"},
 			&cli.StringFlag{Name: "bucket", Required: true, Usage: "Target bucket name"},
 			&cli.StringFlag{Name: "local-file", Required: true, Usage: "Path to local file to upload"},
 			&cli.StringFlag{Name: "object-name", Usage: "Name for the object in MinIO (optional, uses local filename if empty)"},
@@ -41,15 +36,10 @@ func uploadCmd() *cli.Command {
 				fmt.Printf("Using local filename as object name: %s\n", objectName)
 			}
 
-			config := minio.Options{
-				Creds:  credentials.NewStaticV4(c.String("access-key"), c.String("secret-key"), ""),
-				Secure: c.Bool("ssl"),
-			}
-
 			ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 			defer cancel()
 
-			client, err := minio.New(c.String("endpoint"), &config)
+			client, err := newS3Client(c)
 			if err != nil {
 				return fmt.Errorf("client initialization failed: %w", err)
 			}
@@ -115,7 +105,7 @@ func uploadLocalFile(ctx context.Context, client *minio.Client, bucketName, obje
 	}
 	opts.UserMetadata["Chunk-Method"] = chunkMethod
 
-	uploadInfo, err := client.PutObject(
+	return client.PutObject(
 		ctx,
 		bucketName,
 		objectName,
@@ -123,9 +113,77 @@ func uploadLocalFile(ctx context.Context, client *minio.Client, bucketName, obje
 		fileInfo.Size(),
 		opts,
 	)
-	if err != nil {
-		return minio.UploadInfo{}, fmt.Errorf("failed to upload file: %w", err)
-	}
+}
 
-	return uploadInfo, nil
+func downloadCmd() *cli.Command {
+	return &cli.Command{
+		Name:  "download", // Named to match test script
+		Usage: "Download an object from a bucket",
+		Flags: []cli.Flag{
+			&cli.StringFlag{Name: "bucket", Required: true},
+			&cli.StringFlag{Name: "object-name", Required: true},
+			&cli.StringFlag{Name: "local-file", Required: true},
+		},
+		Action: func(c *cli.Context) error {
+			bucketName := c.String("bucket")
+			objectName := c.String("object-name")
+			localFile := c.String("local-file")
+
+			s3Client, err := newS3Client(c)
+			if err != nil {
+				return err
+			}
+
+			start := time.Now()
+			err = s3Client.FGetObject(context.Background(), bucketName, objectName, localFile, minio.GetObjectOptions{})
+			if err != nil {
+				return fmt.Errorf("failed to download object: %w", err)
+			}
+			elapsed := time.Since(start)
+
+			fileInfo, err := os.Stat(localFile)
+			if err != nil {
+				return fmt.Errorf("failed to get info of downloaded file: %w", err)
+			}
+
+			var throughput float64
+			if elapsed.Seconds() > 0 {
+				throughput = float64(fileInfo.Size()) / (1024 * 1024) / elapsed.Seconds()
+			}
+
+			fmt.Printf("Object downloaded successfully:\n")
+			fmt.Printf("  From:       s3://%s/%s\n", bucketName, objectName)
+			fmt.Printf("  To:         %s\n", localFile)
+			fmt.Printf("  Size:       %d bytes\n", fileInfo.Size())
+			fmt.Printf("  Time taken: %s\n", elapsed)
+			fmt.Printf("  Throughput: %.2f MB/s\n", throughput)
+			return nil
+		},
+	}
+}
+
+func deleteCmd() *cli.Command {
+	return &cli.Command{
+		Name:  "delete",
+		Usage: "Delete an object from a bucket",
+		Flags: []cli.Flag{
+			&cli.StringFlag{Name: "bucket", Required: true},
+			&cli.StringFlag{Name: "object-name", Required: true},
+		},
+		Action: func(c *cli.Context) error {
+			bucketName := c.String("bucket")
+			objectName := c.String("object-name")
+
+			s3Client, err := newS3Client(c)
+			if err != nil {
+				return err
+			}
+			err = s3Client.RemoveObject(context.Background(), bucketName, objectName, minio.RemoveObjectOptions{})
+			if err != nil {
+				return fmt.Errorf("failed to delete object: %w", err)
+			}
+			fmt.Printf("Successfully deleted object '%s' from bucket '%s'.\n", objectName, bucketName)
+			return nil
+		},
+	}
 }

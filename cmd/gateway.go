@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path"
+	"path/filepath"
 	"strconv"
 
 	mcli "github.com/minio/cli"
@@ -11,6 +12,7 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v2"
 	"github.com/zhengshuai-xiao/XlatorS/internal"
+	"github.com/zhengshuai-xiao/XlatorS/pkg/daemon"
 	"github.com/zhengshuai-xiao/XlatorS/xlator/dedup"
 	s3forward "github.com/zhengshuai-xiao/XlatorS/xlator/s3forward"
 )
@@ -121,7 +123,15 @@ func cmdGateway() *cli.Command {
 var xobject minio.ObjectLayer
 
 func gateway(c *cli.Context) error {
-	//setup(c, 2)
+	// Handle daemonization first. If this function returns true, it means
+	// the current process is the parent and should exit gracefully.
+	if shouldExit, err := handleBackgroundMode(c); err != nil {
+		// Use Fatalf to exit on configuration or daemonization errors.
+		logger.Fatalf("Failed to start in background: %v", err)
+	} else if shouldExit {
+		return nil
+	}
+
 	var logFile string
 	logDir := c.String("logdir")
 	if logDir != "" {
@@ -285,4 +295,50 @@ func gateway2(ctx *mcli.Context) error {
 	minio.ServerMain4XlatorS(ctx, xobject)
 	logger.Info("end gateway2")
 	return nil
+}
+
+// handleBackgroundMode checks for the --background flag and daemonizes the process if set.
+// It returns true if the current process is the parent and should exit.
+func handleBackgroundMode(c *cli.Context) (shouldExit bool, err error) {
+	// If we are the child daemon process (marked by the env var), just clean up and continue.
+	if daemon.WasReborn() {
+		daemon.UnsetMark()
+		return false, nil
+	}
+
+	// If the background flag is not set, do nothing.
+	if !c.Bool("background") {
+		return false, nil
+	}
+
+	// --- This block is only executed by the initial parent process. ---
+
+	logDir := c.String("logdir")
+	if logDir == "" {
+		return false, fmt.Errorf("logdir must be specified when running in background mode")
+	}
+	if err := os.MkdirAll(logDir, 0750); err != nil {
+		return false, fmt.Errorf("failed to create log directory %s: %w", logDir, err)
+	}
+
+	// The arguments for the child process should be the same as the current one,
+	// but without the --background flag to avoid an infinite loop.
+	var newArgs []string
+	for _, arg := range os.Args {
+		if arg != "--background" && arg != "-d" {
+			newArgs = append(newArgs, arg)
+		}
+	}
+
+	d, err := daemon.Daemonize(
+		filepath.Join(logDir, "xlators.pid"),
+		filepath.Join(logDir, "xlator-"+c.String("xlator")+".log"),
+		newArgs,
+	)
+	if err != nil {
+		return false, fmt.Errorf("unable to run in background: %w", err)
+	}
+
+	// If d is not nil, we are in the parent process and should exit.
+	return d != nil, nil
 }

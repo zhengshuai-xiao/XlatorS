@@ -62,6 +62,9 @@ rebuild: clean build ## Rebuild all binaries from scratch
 test: ## Run unit tests
 	@echo "--> Running unit tests..."
 	$(GOTEST) -v ./...
+auto-test:
+	@echo "--> Running auto tests..."
+	./automation/run_e2e_test.sh
 
 deps: ## Tidy go modules
 	@echo "--> Tidying go modules..."

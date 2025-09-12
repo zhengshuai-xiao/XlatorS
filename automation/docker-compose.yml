@@ -1,0 +1,24 @@
+version: '3.8'
+
+services:
+  redis:
+    image: redis:6-alpine
+    ports:
+      - "6378:6379" # Expose Redis on host port 6378
+
+  xlators:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    depends_on:
+      - redis
+    ports:
+      - "9000:9000" # Gateway S3 port
+    volumes:
+      - ./test_data:/dedup_data
+      - ./test_log:/dedup_log
+    environment:
+      - MINIO_ROOT_USER=minio
+      - MINIO_ROOT_PASSWORD=minioadmin
+    command: >
+      gateway --address ":9000" --xlator Dedup --ds-backend posix --meta-addr "redis:6378/0" --downloadCache /dedup_data/ --loglevel trace --logdir "/dedup_log"
