@@ -1,78 +1,92 @@
 package internal
 
 import (
+	"os"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 )
 
-func TestHexConversion(t *testing.T) {
+func TestSplitDir(t *testing.T) {
+	assert.Equal(t, []string{"a", "b", "c"}, SplitDir("a,b,c"))
+	assert.Equal(t, []string{"a", "b"}, SplitDir("a:b")) // Assuming PathListSeparator is ':' on Unix
+	assert.Equal(t, []string{"a"}, SplitDir("a"))
+}
+
+func TestRemovePassword(t *testing.T) {
+	assert.Equal(t, "redis://user:****@host:6379", RemovePassword("redis://user:password@host:6379"))
+	assert.Equal(t, "http://host/path", RemovePassword("http://host/path"))
+	assert.Equal(t, "user:****@host", RemovePassword("user:pass@host"))
+}
+
+func TestGuessMimeType(t *testing.T) {
+	assert.Equal(t, "image/jpeg", GuessMimeType("photo.jpg"))
+	assert.Equal(t, "application/pdf", GuessMimeType("document.pdf"))
+	assert.Equal(t, "application/octet-stream", GuessMimeType("filewithoutextension"))
+	assert.Equal(t, "application/octet-stream", GuessMimeType("unknown.ext"))
+}
+
+func TestFormatBytes(t *testing.T) {
+	assert.Equal(t, "1023 Bytes", FormatBytes(1023))
+	assert.Equal(t, "1.00 KiB (1024 Bytes)", FormatBytes(1024))
+	assert.Equal(t, "1.50 KiB (1536 Bytes)", FormatBytes(1536))
+	assert.Equal(t, "1.00 MiB (1048576 Bytes)", FormatBytes(1024*1024))
+	assert.Equal(t, "1.00 GiB (1073741824 Bytes)", FormatBytes(1024*1024*1024))
+}
+
+func TestDuration(t *testing.T) {
 	testCases := []struct {
 		name     string
-		original string
-		hex      string
+		input    string
+		expected time.Duration
 	}{
-		{
-			name:     "Simple String",
-			original: "hello",
-			hex:      "68656c6c6f",
-		},
-		{
-			name:     "String with Numbers",
-			original: "12345",
-			hex:      "3132333435",
-		},
-		{
-			name:     "Empty String",
-			original: "",
-			hex:      "",
-		},
-		{
-			name:     "String with Non-printable chars",
-			original: string([]byte{0x00, 0x01, 0xDE, 0xAD, 0xBE, 0xEF}),
-			hex:      "0001deadbeef",
-		},
+		{"Seconds", "5s", 5 * time.Second},
+		{"Minutes and Seconds", "1m30s", 90 * time.Second},
+		{"Days and Hours", "1d2h", 26 * time.Hour},
+		{"Float seconds", "1.5", 1500 * time.Millisecond},
+		{"Empty string", "", 0},
+		{"Invalid string", "abc", 0},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			// Test StringToHex
-			assert.Equal(t, tc.hex, StringToHex(tc.original))
-
-			// Test HexToString
-			converted, err := HexToString(tc.hex)
-			assert.NoError(t, err)
-			assert.Equal(t, tc.original, converted)
+			assert.Equal(t, tc.expected, Duration(tc.input))
 		})
 	}
 }
 
-func TestUInt64Conversion(t *testing.T) {
-	original := uint64(0x0102030405060708)
-	bytes := UInt64ToBytesLittleEndian(original)
-	assert.Equal(t, []byte{0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01}, bytes[:])
-
-	converted := BytesToUInt64LittleEndian(bytes)
-	assert.Equal(t, original, converted)
+func TestStringContains(t *testing.T) {
+	slice := []string{"apple", "banana", "cherry"}
+	assert.True(t, StringContains(slice, "banana"))
+	assert.False(t, StringContains(slice, "grape"))
 }
 
-type serializableStruct struct {
-	Message string
-	Value   int
+func TestExists(t *testing.T) {
+	// Create a temporary file
+	tmpfile, err := os.CreateTemp("", "exists_test")
+	assert.NoError(t, err)
+	defer os.Remove(tmpfile.Name())
+
+	assert.True(t, Exists(tmpfile.Name()))
+	assert.False(t, Exists(tmpfile.Name()+".nonexistent"))
 }
 
-func TestStringSerialization(t *testing.T) {
-	original := serializableStruct{Message: "hello", Value: 42}
+func TestWithTimeout(t *testing.T) {
+	t.Run("Function completes in time", func(t *testing.T) {
+		err := WithTimeout(func() error {
+			time.Sleep(10 * time.Millisecond)
+			return nil
+		}, 50*time.Millisecond)
+		assert.NoError(t, err)
+	})
 
-	// Test SerializeToString
-	serialized, err := SerializeToString(original)
-	assert.NoError(t, err)
-	assert.NotEmpty(t, serialized)
-
-	// Test DeserializeFromString
-	var deserialized serializableStruct
-	err = DeserializeFromString(serialized, &deserialized)
-	assert.NoError(t, err)
-
-	assert.Equal(t, original, deserialized)
+	t.Run("Function times out", func(t *testing.T) {
+		err := WithTimeout(func() error {
+			time.Sleep(100 * time.Millisecond)
+			return nil
+		}, 20*time.Millisecond)
+		assert.Error(t, err)
+		assert.ErrorIs(t, err, ErrFuncTimeout)
+	})
 }

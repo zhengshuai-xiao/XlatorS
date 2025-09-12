@@ -2,6 +2,7 @@ package dedup
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -16,6 +17,12 @@ func TestCleanupNamespace(t *testing.T) {
 
 	ctx := context.Background()
 	namespace := "test-ns"
+
+	// We need to reset mocks for each subtest to avoid interference.
+	newTestXlator := func() (*XlatorDedup, *MockMDS) {
+		xlator.Mdsclient = new(MockMDS)
+		return xlator, xlator.Mdsclient.(*MockMDS)
+	}
 
 	// --- Test Case: Successfully clean up a single DOID ---
 	t.Run("CleanupSingleDOID", func(t *testing.T) {
@@ -66,5 +73,67 @@ func TestCleanupNamespace(t *testing.T) {
 		// Verify the local file was deleted
 		_, err = os.Stat(dobjPath)
 		assert.True(t, os.IsNotExist(err), "The DObj file should have been deleted from the local cache")
+	})
+
+	// --- Test Case: DObj file not found ---
+	t.Run("CleanupDObjNotFound", func(t *testing.T) {
+		xlator, mockMDS := newTestXlator()
+
+		doid := uint64(200)
+		dobjName := "dobj-200"
+
+		mockMDS.On("GetRandomDeletedDOIDs", namespace, int64(gcBatchSize)).Return([]uint64{doid}, nil).Once()
+		mockMDS.On("GetDObjNameInMDS", doid).Return(dobjName)
+
+		// This time, getDataObject returns a "not found" error
+		mockGetDataObject := func(bucket, object string, o minio.ObjectOptions) (DObjReader, error) {
+			return DObjReader{}, os.ErrNotExist
+		}
+
+		// We expect the DOID to be cleaned up from the GC set anyway
+		mockMDS.On("RemoveSpecificDeletedDOIDs", namespace, []uint64{doid}).Return(nil).Once()
+		mockMDS.On("GetRandomDeletedDOIDs", namespace, int64(gcBatchSize)).Return([]uint64{}, nil).Once()
+
+		xlator.cleanupNamespace(ctx, namespace, mockGetDataObject)
+		mockMDS.AssertExpectations(t)
+	})
+
+	// --- Test Case: Failure to remove FPs ---
+	t.Run("CleanupRemoveFPsFails", func(t *testing.T) {
+		xlator, mockMDS := newTestXlator()
+
+		doid := uint64(300)
+		dobjName := "dobj-300"
+		dobjPath := filepath.Join(xlator.dobjCachePath, dobjName)
+		f, err := os.Create(dobjPath)
+		assert.NoError(t, err)
+		f.Close()
+
+		dummyFP := "dummy-fp-for-fail-case"
+		fpMap := map[string]fpinDObj{dummyFP: {}}
+
+		mockMDS.On("GetRandomDeletedDOIDs", namespace, int64(gcBatchSize)).Return([]uint64{doid}, nil).Once()
+		mockMDS.On("GetDObjNameInMDS", doid).Return(dobjName)
+
+		// Mock RemoveFPs to fail
+		mockMDS.On("RemoveFPs", namespace, []string{dummyFP}, doid).Return(fmt.Errorf("redis is down")).Once()
+
+		mockMDS.On("GetRandomDeletedDOIDs", namespace, int64(gcBatchSize)).Return([]uint64{}, nil).Once()
+
+		mockGetDataObject := func(bucket, object string, o minio.ObjectOptions) (DObjReader, error) {
+			file, _ := os.Open(dobjPath)
+			return DObjReader{
+				path:  dobjPath,
+				fpmap: fpMap,
+				filer: file,
+			}, nil
+		}
+
+		xlator.cleanupNamespace(ctx, namespace, mockGetDataObject)
+		mockMDS.AssertExpectations(t)
+
+		// Verify the local file was NOT deleted
+		_, err = os.Stat(dobjPath)
+		assert.NoError(t, err, "The DObj file should NOT have been deleted")
 	})
 }

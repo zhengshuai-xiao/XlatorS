@@ -1,11 +1,14 @@
 package dedup
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	minio "github.com/minio/minio/cmd"
 	"github.com/stretchr/testify/assert"
 	"github.com/zhengshuai-xiao/XlatorS/internal/compression"
 )
@@ -99,4 +102,69 @@ func TestWriteDObj(t *testing.T) {
 		// It would verify that truncateDObj and newDObj are called correctly.
 		t.Skip("Skipping DObj rollover test for brevity.")
 	})
+}
+
+func TestReadWriteDataObject(t *testing.T) {
+	xlator, mockMDS, teardown := setupTestXlator(t)
+	defer teardown()
+
+	ctx := context.Background()
+	compressor, err := compression.GetCompressorViaString("zlib")
+	assert.NoError(t, err)
+
+	// 1. Prepare chunks and write them to a DObj
+	chunk1Data := []byte(strings.Repeat("A", 1024))
+	chunk2Data := []byte(strings.Repeat("B", 2048))
+	chunk3Data := []byte(strings.Repeat("C", 1536))
+	originalContent := append(append(chunk1Data, chunk2Data...), chunk3Data...)
+
+	chunks := []Chunk{
+		{Data: chunk1Data, Len: uint64(len(chunk1Data))},
+		{Data: chunk2Data, Len: uint64(len(chunk2Data))},
+		{Data: chunk3Data, Len: uint64(len(chunk3Data))},
+	}
+	CalcFPs(chunks) // Calculate real FPs
+
+	dobj := &DObj{bucket: "test-ns.test-bucket"}
+	mockMDS.On("GetIncreasedDOID").Return(int64(1), nil).Once()
+	mockMDS.On("GetDObjNameInMDS", uint64(1)).Return("dobj-1").Once()
+	mockMDS.On("GetDOIDFromDObjName", "dobj-1").Return(int64(1), nil).Times(3)
+
+	_, _, err = xlator.writeDObj(ctx, dobj, chunks, compressor)
+	assert.NoError(t, err)
+	err = xlator.truncateDObj(ctx, dobj)
+	assert.NoError(t, err)
+
+	// 2. Prepare manifest for reading
+	manifest := []ChunkInManifest{
+		{FP: chunks[0].FP, Len: chunks[0].Len, DOid: 1},
+		{FP: chunks[1].FP, Len: chunks[1].Len, DOid: 1},
+		{FP: chunks[2].FP, Len: chunks[2].Len, DOid: 1},
+	}
+
+	// 3. Run test cases for reading
+	testCases := []struct {
+		name        string
+		startOffset int64
+		length      int64
+		expected    []byte
+	}{
+		{"ReadFull", 0, -1, originalContent},
+		{"ReadFromOffset", 1024, -1, originalContent[1024:]},
+		{"ReadWithLength", 0, 1024 + 2048, originalContent[:1024+2048]},
+		{"ReadRangeSpanningChunks", 1000, 300, originalContent[1000 : 1000+300]},
+		{"ReadRangeInSingleChunk", 10, 50, originalContent[10:60]},
+		{"ReadRangePastEnd", 4000, 1000, originalContent[4000:]},
+		{"ReadZeroLength", 100, 0, nil},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			writer := &bytes.Buffer{}
+			mockMDS.On("GetDObjNameInMDS", uint64(1)).Return("dobj-1").Once()
+			err := xlator.readDataObject("test-ns.test-bucket", manifest, tc.startOffset, tc.length, writer, minio.ObjectOptions{})
+			assert.NoError(t, err)
+			assert.Equal(t, tc.expected, writer.Bytes())
+		})
+	}
 }

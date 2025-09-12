@@ -662,20 +662,25 @@ func (x *XlatorDedup) readDataObject(backendBucket string, chunks []ChunkInManif
 			continue
 		}
 
-		// Seek to the correct position in the data object file.
-		seekPos := int64(fpinDObj.Offset) + offsetInChunk
-		_, err = dobjReader.filer.Seek(seekPos, io.SeekStart)
-		if err != nil {
-			logger.Errorf("readDataObject: failed to seek in file %s: %v", dobjReader.path, err)
-			return err
-		}
-
 		//decompress
 		compressor, err := compression.GetCompressorViaType(compression.CompressionType(fpinDObj.CompressType))
 		if err != nil {
 			logger.Errorf("readDataObject: failed to get compressor: %v", err)
 			return err
 		}
+
+		// Seek to the correct position in the data object file.
+		seekPos := int64(fpinDObj.Offset)
+		if compressor == nil {
+			// For uncompressed data, we can seek directly into the chunk.
+			seekPos += offsetInChunk
+		}
+		_, err = dobjReader.filer.Seek(seekPos, io.SeekStart)
+		if err != nil {
+			logger.Errorf("readDataObject: failed to seek in file %s: %v", dobjReader.path, err)
+			return err
+		}
+
 		var n int64
 		if compressor != nil {
 			// For compressed chunks, read the whole compressed block first.

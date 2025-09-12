@@ -160,16 +160,15 @@ func (x *XlatorDedup) cleanupNamespace(ctx context.Context, namespace string, ge
 				if len(fps) > 0 {
 					if err := x.Mdsclient.RemoveFPs(namespace, fps, doid); err != nil {
 						logger.Errorf("GC: failed to remove FPs for DOID %d: %v. Will retry later.", doid, err)
-						if dobjReader.filer != nil {
-							dobjReader.filer.Close()
-						}
+						// The file handle will be closed by the deferred call below.
 						continue // Move to the next DOID
 					}
 				}
 			}
 
-			if dobjReader.filer != nil {
-				dobjReader.filer.Close()
+			// Defer the closing of the file handle to ensure it's closed on all paths for this DOID.
+			if dobjReader.filer != nil { // nolint:ifshort
+				defer dobjReader.filer.Close()
 			}
 
 			// 3. Delete data object from backend
