@@ -178,15 +178,18 @@ func (x *XlatorDedup) writeDObj(ctx context.Context, dobj *DObj, chunks []Chunk,
 				return 0, 0, err
 			}
 		}
-		//do compression
-		compressedData, err := compressor.Compress(chunks[i].Data)
-		if err != nil {
-			return 0, 0, err
+		if compressor != nil {
+			//do compression
+			compressedData, err := compressor.Compress(chunks[i].Data)
+			if err != nil {
+				return 0, 0, err
+			}
+			//originalLen := chunks[i].Len
+			compressedLen += (len(chunks[i].Data) - len(compressedData))
+			chunks[i].Data = compressedData
+			// NOTE: We do not modify chunks[i].Len. It remains the original uncompressed length.
+			// The compressed length is now len(chunks[i].Data).
 		}
-
-		compressedLen += (len(chunks[i].Data) - len(compressedData))
-		chunks[i].Data = compressedData
-		chunks[i].Len = uint64(len(compressedData))
 
 		wlen, err := internal.WriteAll(dobj.filer, chunks[i].Data)
 		if err != nil {
@@ -203,20 +206,24 @@ func (x *XlatorDedup) writeDObj(ctx context.Context, dobj *DObj, chunks []Chunk,
 		chunks[i].DOid = uint64(doid)
 		//chunks[i].OffInDOid = dobj.dob_offset
 		//chunks[i].LenInDOid = chunks[i].Len
+		var compressType compression.CompressionType = 0
+		if compressor != nil {
+			compressType = compressor.Type()
+		}
 
 		// Cache the FP and its newly assigned DOid for this batch.
 		batchFPCache[chunks[i].FP] = chunks[i].DOid
 		fp := fpinDObj{
 			Offset:       dobj.dob_offset,
-			Len:          chunks[i].Len,
-			CRC:          0, //TODO;
-			CompressType: byte(compressor.Type()),
+			Len:          uint64(len(chunks[i].Data)), // Use the actual stored length (compressed or not)
+			CRC:          0,                           //TODO;
+			CompressType: byte(compressType),
 		}
 
 		copy(fp.FP[:], chunks[i].FP[:])
 		dobj.fps = append(dobj.fps, fp)
 
-		dobj.dob_offset += uint64(chunks[i].Len)
+		dobj.dob_offset += uint64(len(chunks[i].Data))
 
 	}
 	return
@@ -236,7 +243,7 @@ func (x *XlatorDedup) writeObj(ctx context.Context, ns string, r *minio.PutObjRe
 		return nil, err
 	}
 	//get the compressor, zlib is the default
-	compressor, err := compression.GetCompressorViaString("zlib")
+	compressor, err := compression.GetCompressorViaString(x.Compression)
 	if err != nil {
 		return nil, err
 	}
@@ -322,7 +329,7 @@ func (x *XlatorDedup) writeObj(ctx context.Context, ns string, r *minio.PutObjRe
 			for _, chunk := range chunks {
 				manifestList = append(manifestList, ChunkInManifest{
 					FP:   chunk.FP,
-					Len:  chunk.Len,
+					Len:  chunk.Len, // chunk.Len now correctly holds the original length
 					DOid: chunk.DOid,
 				})
 			}
@@ -370,8 +377,8 @@ func (x *XlatorDedup) writePart(ctx context.Context, ns string, r *minio.PutObjR
 		return 0, 0, nil, err
 	}
 
-	//get the compressor, zlib is the default
-	compressor, err := compression.GetCompressorViaString("zlib")
+	//get the compressor, snappy is the default
+	compressor, err := compression.GetCompressorViaString(x.Compression)
 	if err != nil {
 		return 0, 0, nil, err
 	}
@@ -450,7 +457,7 @@ func (x *XlatorDedup) writePart(ctx context.Context, ns string, r *minio.PutObjR
 			for _, chunk := range chunks {
 				manifestList = append(manifestList, ChunkInManifest{
 					FP:   chunk.FP,
-					Len:  chunk.Len,
+					Len:  chunk.Len, // chunk.Len now correctly holds the original length
 					DOid: chunk.DOid,
 				})
 			}
@@ -638,12 +645,12 @@ func (x *XlatorDedup) readDataObject(backendBucket string, chunks []ChunkInManif
 		}
 
 		// Calculate how much to read from this chunk.
-		offsetInChunk := int64(0)
+		var offsetInChunk int64
 		if startOffset > currentObjectOffset {
 			offsetInChunk = startOffset - currentObjectOffset
 		}
 
-		bytesToReadInChunk := chunkLen - offsetInChunk
+		bytesToReadInChunk := chunkLen - offsetInChunk // This is based on original chunk length now
 		if length != -1 {
 			remainingLength := length - totalBytesWritten
 			if bytesToReadInChunk > remainingLength {
@@ -663,33 +670,47 @@ func (x *XlatorDedup) readDataObject(backendBucket string, chunks []ChunkInManif
 			return err
 		}
 
-		buffer := make([]byte, fpinDObj.Len)
-		dobjReader.filer.Read(buffer)
 		//decompress
 		compressor, err := compression.GetCompressorViaType(compression.CompressionType(fpinDObj.CompressType))
 		if err != nil {
 			logger.Errorf("readDataObject: failed to get compressor: %v", err)
 			return err
 		}
-		decompressbuf, err := compressor.Decompress(buffer)
-		if err != nil {
-			logger.Errorf("readDataObject: failed to decompress: %v", err)
-			return err
+		var n int64
+		if compressor != nil {
+			// For compressed chunks, read the whole compressed block first.
+			buffer := make([]byte, fpinDObj.Len)
+			if _, err := io.ReadFull(dobjReader.filer, buffer); err != nil {
+				logger.Errorf("readDataObject: failed to read compressed chunk from %s: %v", dobjReader.path, err)
+				return err
+			}
+
+			decompressbuf, err := compressor.Decompress(buffer)
+			if err != nil {
+				logger.Errorf("readDataObject: failed to decompress: %v", err)
+				return err
+			}
+
+			// The length of decompressbuf is the original chunk length.
+			// Ensure the slice operation is safe.
+			if offsetInChunk+bytesToReadInChunk > int64(len(decompressbuf)) {
+				return fmt.Errorf("readDataObject: slice bounds out of range. offsetInChunk=%d, bytesToReadInChunk=%d, decompressedLen=%d", offsetInChunk, bytesToReadInChunk, len(decompressbuf))
+			}
+			nwriten, err := writer.Write(decompressbuf[offsetInChunk : offsetInChunk+bytesToReadInChunk])
+			if err != nil {
+				logger.Errorf("readDataObject: failed to write decompressed buf from %s: %v", dobjReader.path, err)
+				return err
+			}
+			n = int64(nwriten)
+		} else {
+			n, err = io.CopyN(writer, dobjReader.filer, bytesToReadInChunk) // For uncompressed, chunkLen == fpinDObj.Len
+			if err != nil {
+				logger.Errorf("readDataObject: failed to read from file %s: %v", dobjReader.path, err)
+				return err
+			}
 		}
 
-		// Copy the required number of bytes from the data object file to the writer.
-		//n, err := io.Copy(writer, decompressbuf)
-		n, err := writer.Write(decompressbuf)
-		if err != nil {
-			logger.Errorf("readDataObject: failed to Write decompressed buf %s: %v", dobjReader.path, err)
-			return err
-		}
-		if n != len(decompressbuf) {
-			logger.Errorf("failed to write all data(%d) to writer(%d)", len(decompressbuf), n)
-			return err
-		}
-
-		totalBytesWritten += int64(n)
+		totalBytesWritten += n
 		currentObjectOffset += chunkLen
 	}
 

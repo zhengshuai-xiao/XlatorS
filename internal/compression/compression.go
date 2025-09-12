@@ -3,14 +3,16 @@ package compression
 type CompressionType byte
 
 const (
-	Compress_zlib   CompressionType = iota //0
+	Compress_none   CompressionType = iota //0
 	Compress_snappy                        //1
+	Compress_zlib
 )
 
 var (
 	CompressionMethods = map[string]CompressionType{
-		"zlib":   Compress_zlib,
+		"none":   Compress_none,
 		"snappy": Compress_snappy,
+		"zlib":   Compress_zlib,
 	}
 )
 
@@ -34,6 +36,8 @@ func GetCompressorViaString(compressionStr string) (Compressor, error) {
 		return nil, ErrInvalidCompressionType
 	}
 	switch compressionType {
+	case Compress_none:
+		return nil, nil
 	case Compress_zlib:
 		return NewZlib(), nil
 	case Compress_snappy:
@@ -45,6 +49,8 @@ func GetCompressorViaString(compressionStr string) (Compressor, error) {
 
 func GetCompressorViaType(compressionType CompressionType) (Compressor, error) {
 	switch compressionType {
+	case Compress_none:
+		return nil, nil
 	case Compress_zlib:
 		return NewZlib(), nil
 	case Compress_snappy:

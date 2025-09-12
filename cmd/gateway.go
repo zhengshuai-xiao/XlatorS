@@ -27,10 +27,6 @@ func cmdGateway() *cli.Command {
 			Usage: "log level for gateway: trace/info/warn/error",
 			Value: "info",
 		},
-		&cli.StringFlag{
-			Name:  "access-log",
-			Usage: "path for xlators access log",
-		},
 		&cli.BoolFlag{
 			Name:    "background",
 			Aliases: []string{"d"},
@@ -39,10 +35,6 @@ func cmdGateway() *cli.Command {
 		&cli.BoolFlag{
 			Name:  "no-banner",
 			Usage: "disable MinIO startup information",
-		},
-		&cli.BoolFlag{
-			Name:  "multi-buckets",
-			Usage: "use top level of directories as buckets",
 		},
 		&cli.BoolFlag{
 			Name:  "keep-etag",
@@ -70,8 +62,9 @@ func cmdGateway() *cli.Command {
 			Usage: "hide the directories created by PUT Object API",
 		},
 		&cli.StringFlag{
-			Name:  "domain",
-			Usage: "domain for virtual-host-style requests",
+			Name:  "compression",
+			Usage: "compress data with the specified algorithm: none/snappy/zlib",
+			Value: "snappy",
 		},
 		&cli.StringFlag{
 			Name:  "downloadCache",
@@ -201,6 +194,7 @@ func gateway(c *cli.Context) error {
 				BackendAddr: c.String("backend-addr"),
 				MetaDriver:  "redis",
 				MetaAddr:    c.String("meta-addr"),
+				Compression: c.String("compression"),
 			},
 		)
 	} else if c.String("xlator") == dedup.XlatorName {
@@ -220,6 +214,7 @@ func gateway(c *cli.Context) error {
 				MetaAddr:      c.String("meta-addr"),
 				DownloadCache: c.String("downloadCache"),
 				DSBackendType: c.String("ds-backend"),
+				Compression:   c.String("compression"),
 			},
 		)
 	} else if c.String("xlator") == "CryptoCompress" { //cryptocompress.XlatorName {

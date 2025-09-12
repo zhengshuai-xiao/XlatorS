@@ -18,6 +18,7 @@ type Config struct {
 	MetaAddr      string
 	DownloadCache string
 	DSBackendType string
+	Compression   string
 }
 
 const (

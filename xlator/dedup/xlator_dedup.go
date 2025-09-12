@@ -61,6 +61,7 @@ type XlatorDedup struct {
 	fastCDCAvgSize       int
 	fastCDCMaxSize       int
 	dsBackendType        DObjBackendType // datastore bankend type: "posix" or "s3"
+	Compression          string
 }
 
 var logger = internal.GetLogger("XlatorDedup")
@@ -152,11 +153,10 @@ func NewXlatorDedup(gConf *internal.Config) (*XlatorDedup, error) {
 	}
 	logger.Infof("Data object cache directory '%s' is ready.", xlatorDedup.dobjCachePath)
 
-	/*err = xlatorDedup.CreateBackendBucket()
-	if err != nil {
-		logger.Errorf("failed to create backend bucket: %v", err)
-		return xlatorDedup, err
-	}*/
+	//set compression
+	xlatorDedup.Compression = strings.ToLower(gConf.Compression)
+	logger.Infof("compression is using %s", xlatorDedup.Compression)
+
 	// Start the background GC worker
 	//TODO: only leader can launch GC, so need leader selection
 	xlatorDedup.startGC()
