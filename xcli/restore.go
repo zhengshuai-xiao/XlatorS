@@ -16,8 +16,9 @@ import (
 
 func restoreCmd() *cli.Command {
 	return &cli.Command{
-		Name:  "restore",
-		Usage: "Restore a directory from a backup stored in S3",
+		Name:      "restore",
+		Usage:     "Restore a directory or specific files from a backup stored in S3",
+		ArgsUsage: "[files/dirs to restore...]",
 		Flags: []cli.Flag{
 			&cli.StringFlag{Name: "bucket", Required: true, Usage: "Source bucket name"},
 			&cli.StringFlag{Name: "object-base-name", Required: true, Usage: "Base name of the backup objects (without .DATA or .HDR suffix)"},
@@ -60,6 +61,8 @@ func restoreCmd() *cli.Command {
 			// 4. Create a pipe to reconstruct the tar stream
 			pr, pw := io.Pipe()
 
+			pathsToRestore := c.Args().Slice()
+
 			// 5. Start a goroutine to reconstruct the tar stream
 			go func() {
 				defer pw.Close()
@@ -70,6 +73,30 @@ func restoreCmd() *cli.Command {
 				defer tw.Close()
 
 				for _, fileMeta := range manifest.Files {
+					shouldRestore := false
+					if len(pathsToRestore) == 0 {
+						shouldRestore = true // Restore all if no specific paths are provided
+					} else {
+						for _, pathToRestore := range pathsToRestore {
+							// Normalize paths to avoid issues with trailing slashes
+							cleanPathToRestore := strings.TrimRight(pathToRestore, "/")
+							cleanHeaderName := strings.TrimRight(fileMeta.Header.Name, "/")
+
+							// Restore if it's an exact match, or if the header name is a child of the path to restore.
+							if cleanHeaderName == cleanPathToRestore || strings.HasPrefix(fileMeta.Header.Name, cleanPathToRestore+"/") ||
+								// Also restore parent directories of the path to restore.
+								(fileMeta.Header.Typeflag == tar.TypeDir && strings.HasPrefix(cleanPathToRestore, cleanHeaderName+"/")) {
+								shouldRestore = true
+								break
+							}
+
+						}
+					}
+
+					if !shouldRestore {
+						continue
+					}
+
 					// Write the original header
 					if err := tw.WriteHeader(fileMeta.Header); err != nil {
 						pw.CloseWithError(fmt.Errorf("failed to write tar header for %s: %w", fileMeta.Header.Name, err))

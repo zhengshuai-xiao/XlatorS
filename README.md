@@ -129,23 +129,19 @@ Object API (Amazon S3 compatible):
 
 ![design](./doc/cn/images/XlatorS_webUI.png "XlatorSwebUI")
 
-你也可以使用项目提供的 `./bin/xc` 工具来上传文件，并动态指定分块算法。
+你也可以使用项目提供的 `./bin/xcli` 工具来上传文件，并动态指定分块算法。
 
 * **指定使用定长分块 (FixedCDC) 算法上传**
 
 ```
-zxiao@localhost:/workspace/X/XlatorS/bin$ ./xc upload -h
+zxiao@localhost:/workspace/X/XlatorS$ bin/xcli upload --help
 NAME:
-   xc upload - Upload a local file to MinIO/XlatorS
+   xcli upload - Upload a local file to MinIO/XlatorS
 
 USAGE:
-   xc upload [command options]
+   xcli upload [command options]
 
 OPTIONS:
-   --endpoint value      MinIO server endpoint (default: "localhost:9000")
-   --access-key value    MinIO access key (default: "minio")
-   --secret-key value    MinIO secret key (default: "minioadmin")
-   --ssl                 Use SSL for connection (default: false)
    --bucket value        Target bucket name
    --local-file value    Path to local file to upload
    --object-name value   Name for the object in MinIO (optional, uses local filename if empty)
@@ -154,44 +150,45 @@ OPTIONS:
    --chunk-method value  Chunking algorithm to use (FastCDC or FixedCDC) (default: "FastCDC")
    --help, -h            show help
 
-zxiao@localhost:/dedup_data$ /workspace/X/XlatorS/bin/xc upload --bucket xzs.xzs --local-file /tmp/50dedup200M.data --object-name 50dedup200M.data  --partSize 10485760 --chunk-method FixedCDC
+zxiao@localhost:/workspace/X/XlatorS$ /workspace/X/XlatorS/bin/xcli --endpoint "127.0.0.1:9000" upload --bucket xzs.xzs --local-file /tmp/50dedup200M.data --object-name 50dedup200M.data  --partSize 10485760 --chunk-method FixedCDC
 File uploaded successfully:
   Bucket:     xzs.xzs
   Object:     50dedup200M.data
   Size:       209715200 bytes
   ETag:       2cdd93ba2618005da199dc7b9df57706-20
-  Time taken: 1.181928918s
-  Throughput: 169.21 MB/s
+  Time taken: 1.163738887s
+  Throughput: 171.86 MB/s
 
 Dedup xlator log:
-2025/08/31 23:38:22.276495 XlatorDedup[5581] <INFO>: Successfully put object xzs.xzs/50dedup200M.data, size: 209715200, wrote: 105971487, dedupRate: 49.47%, ETag: d41d8cd98f00b204e9800998ecf8427e, elapsed: 1.049604225s, throughput: 190.55 MB/s [PutObject@xlator_dedup.go:465]
+2025/08/31 23:38:22.276495 XlatorDedup[5581] <INFO>: Successfully completed multipart upload for xzs.xzs/50dedup200M.data, size: 209715200, wrote: 104864800, dedupRate: 50.00%, ETag: 2cdd93ba2618005da199dc7b9df57706-20 [CompleteMultipartUpload@xlator_dedup.go:760]
 
 =================get========================
-zxiao@localhost:/dedup_data$ /workspace/X/XlatorS/bin/xc getaws --bucket xzs.xzs --object-name 50dedup200M.data --local-file /tmp/50dedup200M.data.copy
-SDK 2025/09/01 17:53:53 WARN Response has no supported checksum. Not validating response payload.
- xzs.xzs/50dedup200M.data has been downloaded to /tmp/50dedup200M.data.copy successfully
+zxiao@localhost:/workspace/X/XlatorS$ /workspace/X/XlatorS/bin/xcli --endpoint "127.0.0.1:9000" download --bucket xzs.xzs  --object-name 50dedup200M.data --local-file /tmp/50dedup200M.data.cp
+Object downloaded successfully:
+  From:       s3://xzs.xzs/50dedup200M.data
+  To:         /tmp/50dedup200M.data.cp
   Size:       209715200 bytes
-  Time taken: 308.97092ms
-  Throughput: 647.31 MB/s
+  Time taken: 294.710689ms
+  Throughput: 678.63 MB/s
 zxiao@localhost:/dedup_data$ md5sum /tmp/50dedup200M.data /tmp/50dedup200M.data.copy
 f3d1e82711b27546d4b3b3cd6c1de07f  /tmp/50dedup200M.data
-f3d1e82711b27546d4b3b3cd6c1de07f  /tmp/50dedup200M.data.copy
+f3d1e82711b27546d4b3b3cd6c1de07f  /tmp/50dedup200M.data.cp
 
 ```
 
 * **使用默认的 FastCDC 算法上传文件** :
   ```
-  zxiao@localhost:/workspace/X/XlatorS/bin$ ./xc upload --bucket xzs.xzs --local-file /tmp/50dedup200M.data --object-name 50dedup200M.data1 --disable-multipart true
+  zxiao@localhost:/workspace/X/XlatorS$ /workspace/X/XlatorS/bin/xcli --endpoint "127.0.0.1:9000" upload --bucket xzs.xzs --local-file /tmp/50dedup200M.data --object-name 50dedup200M.data1 --disable-multipart true
   File uploaded successfully:
     Bucket:     xzs.xzs
     Object:     50dedup200M.data1
     Size:       209715200 bytes
     ETag:       d41d8cd98f00b204e9800998ecf8427e
-    Time taken: 1.455248165s
-    Throughput: 137.43 MB/s
+    Time taken: 1.160631531s
+    Throughput: 172.32 MB/s
 
   Dedup xlator log:
-  2025/08/31 23:41:31.758537 XlatorDedup[5581] <INFO>: Successfully put object xzs.xzs/50dedup200M.data1, size: 209715200, wrote: 0, dedupRate: 100.00%, ETag: d41d8cd98f00b204e9800998ecf8427e, elapsed: 999.527281ms, throughput: 200.09 MB/s [PutObject@xlator_dedup.go:465]
+  2025/08/31 23:41:31.758537 XlatorDedup[5581] <INFO>: Successfully put object xzs.xzs/50dedup200M.data1, size: 209715200, wrote: 105979749, dedupRate: 49.46%, compressRate: -0.00%, ETag: d41d8cd98f00b204e9800998ecf8427e, elapsed: 829.952063ms, throughput: 240.98 MB/s [PutObject@xlator_dedup.go:491]
   ```
 
 **注意** : 桶的命名需要遵循 `namespace.bucketname` 的格式，这用于实现基于命名空间的去重隔离。
@@ -200,11 +197,16 @@ f3d1e82711b27546d4b3b3cd6c1de07f  /tmp/50dedup200M.data.copy
 
 项目提供了一个自动化的端到端测试脚本，用于验证整个系统的核心功能。
 
-要运行测试，请确保你已经安装了 `docker` 和 `docker-compose`，然后在项目根目录下执行：
+要运行测试，请确保你已经开启了redis service ~~安装了 `docker` 和 `docker-compose`~~，然后在项目根目录下执行下面两种命令中的一个：
+
+```
+make auto-test
+```
+
+或者
 
 ```bash
-cd automation/
-./run_e2e_test.sh
+./automation/run_e2e_test.sh
 ```
 
 ## 🐳 使用 Docker 运行
