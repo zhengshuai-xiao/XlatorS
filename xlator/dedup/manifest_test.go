@@ -63,10 +63,3 @@ func TestManifestOperations(t *testing.T) {
 		assert.True(t, os.IsNotExist(err), "Manifest file should be deleted")
 	})
 }
-
-// padFP pads or truncates a string to 32 bytes for testing.
-func padFP(s string) string {
-	b := make([]byte, 32)
-	copy(b, s)
-	return string(b)
-}

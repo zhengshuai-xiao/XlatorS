@@ -14,6 +14,15 @@ import (
 	"github.com/zhengshuai-xiao/XlatorS/pkg/mytar"
 )
 
+//   - For size smaller than 128MiB PutObject automatically does a
+//     single atomic Put operation.
+//   - For size larger than 128MiB PutObject automatically does a
+//     multipart Put operation.
+//   - For size input as -1 PutObject does a multipart Put operation
+//     until input stream reaches EOF. Maximum object size that can
+//     be uploaded through this operation will be 5TiB.
+
+// disable-multipart cannot be ture, because we do not know the data size
 func backupCmd() *cli.Command {
 	return &cli.Command{
 		Name:  "backup",
@@ -21,8 +30,12 @@ func backupCmd() *cli.Command {
 		Flags: []cli.Flag{
 			&cli.StringFlag{Name: "bucket", Required: true, Usage: "Target bucket name"},
 			&cli.StringFlag{Name: "src-dir", Required: true, Usage: "Source directory to back up"},
+			//&cli.BoolFlag{Name: "disable-multipart", Usage: "Disable multipart upload"},
+			&cli.StringFlag{Name: "partSize", Value: "1G", Usage: "Part size for multipart upload (e.g., 64M, 1G)"},
+			&cli.StringFlag{Name: "chunk-method", Value: "FastCDC", Usage: "Chunking algorithm to use (FastCDC or FixedCDC)"},
 		},
 		Action: func(c *cli.Context) error {
+			disableMultipart := false // always false
 			bucketName := c.String("bucket")
 			srcDir := c.String("src-dir")
 
@@ -52,6 +65,11 @@ func backupCmd() *cli.Command {
 					return fmt.Errorf("failed to create bucket: %w", err)
 				}
 				log.Printf("Bucket %s created successfully\n", bucketName)
+			}
+
+			partSize, err := parseSize(c.String("partSize"))
+			if err != nil {
+				return fmt.Errorf("invalid partSize: %w", err)
 			}
 
 			// 4. Prepare object names and pipes
@@ -87,8 +105,14 @@ func backupCmd() *cli.Command {
 			go func() {
 				defer wg.Done()
 				log.Printf("Uploading header object: %s", hdrObjectName)
-				opts := minio.PutObjectOptions{ContentType: "application/json", PartSize: 500 * 1024 * 1024}
-				_, err := client.PutObject(ctx, bucketName, hdrObjectName, hReader, -1, opts)
+				// The HDR object is typically small, so we can use simpler options.
+				// Multipart is unlikely to be triggered.
+				hdrOpts := minio.PutObjectOptions{
+					ContentType:      "application/json",
+					DisableMultipart: disableMultipart,
+					PartSize:         partSize,
+				}
+				_, err := client.PutObject(ctx, bucketName, hdrObjectName, hReader, -1, hdrOpts)
 				if err != nil {
 					errChan <- fmt.Errorf("failed to upload header object: %w", err)
 				}
@@ -99,8 +123,14 @@ func backupCmd() *cli.Command {
 			go func() {
 				defer wg.Done()
 				log.Printf("Uploading data object: %s", dataObjectName)
-				opts := minio.PutObjectOptions{ContentType: "application/octet-stream"}
-				_, err := client.PutObject(ctx, bucketName, dataObjectName, dReader, -1, opts)
+				dataOpts := minio.PutObjectOptions{
+					ContentType:      "application/octet-stream",
+					DisableMultipart: disableMultipart,
+					PartSize:         partSize,
+					UserMetadata:     make(map[string]string),
+				}
+				dataOpts.UserMetadata["Chunk-Method"] = c.String("chunk-method")
+				_, err := client.PutObject(ctx, bucketName, dataObjectName, dReader, -1, dataOpts)
 				if err != nil {
 					errChan <- fmt.Errorf("failed to upload data object: %w", err)
 				}

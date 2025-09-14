@@ -114,7 +114,7 @@ func (x *XlatorDedup) runGC() {
 }
 
 // cleanupNamespace processes the deleted DOID queue for a single namespace.
-func (x *XlatorDedup) cleanupNamespace(ctx context.Context, namespace string, getDataObjectFunc func(bucket, object string, o minio.ObjectOptions) (DObjReader, error)) {
+func (x *XlatorDedup) cleanupNamespace(ctx context.Context, namespace string, getDataObjectFunc func(bucket, object string, o minio.ObjectOptions) (DCReader, error)) {
 	backendBucket := GetBackendBucketName(namespace)
 
 	for {

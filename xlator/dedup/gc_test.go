@@ -37,8 +37,8 @@ func TestCleanupNamespace(t *testing.T) {
 
 		// Mock the DObj content (for fpmap)
 		dummyFP := "dummy-fingerprint-string-for-gc"
-		fpMap := make(map[string]fpinDObj)
-		fpMap[dummyFP] = fpinDObj{Offset: 8, Len: 10}
+		fpMap := make(map[string]BlockHeader)
+		fpMap[dummyFP] = BlockHeader{Offset: 8, Len: 10}
 
 		// Setup mock expectations
 		mockMDS.On("GetRandomDeletedDOIDs", namespace, int64(gcBatchSize)).Return([]uint64{doid}, nil).Once()
@@ -53,10 +53,10 @@ func TestCleanupNamespace(t *testing.T) {
 		mockMDS.On("GetRandomDeletedDOIDs", namespace, int64(gcBatchSize)).Return([]uint64{}, nil).Once()
 
 		// Create a mock getDataObject function for this test case.
-		mockGetDataObject := func(bucket, object string, o minio.ObjectOptions) (DObjReader, error) {
-			// Return a mocked DObjReader
+		mockGetDataObject := func(bucket, object string, o minio.ObjectOptions) (DCReader, error) {
+			// Return a mocked DCReader
 			file, _ := os.Open(dobjPath) // Re-open for the test
-			return DObjReader{
+			return DCReader{
 				path:   dobjPath,
 				fpmap:  fpMap,
 				filer:  file, // The filer needs to be closable
@@ -86,8 +86,8 @@ func TestCleanupNamespace(t *testing.T) {
 		mockMDS.On("GetDObjNameInMDS", doid).Return(dobjName)
 
 		// This time, getDataObject returns a "not found" error
-		mockGetDataObject := func(bucket, object string, o minio.ObjectOptions) (DObjReader, error) {
-			return DObjReader{}, os.ErrNotExist
+		mockGetDataObject := func(bucket, object string, o minio.ObjectOptions) (DCReader, error) {
+			return DCReader{}, os.ErrNotExist
 		}
 
 		// We expect the DOID to be cleaned up from the GC set anyway
@@ -110,7 +110,7 @@ func TestCleanupNamespace(t *testing.T) {
 		f.Close()
 
 		dummyFP := "dummy-fp-for-fail-case"
-		fpMap := map[string]fpinDObj{dummyFP: {}}
+		fpMap := map[string]BlockHeader{dummyFP: {}}
 
 		mockMDS.On("GetRandomDeletedDOIDs", namespace, int64(gcBatchSize)).Return([]uint64{doid}, nil).Once()
 		mockMDS.On("GetDObjNameInMDS", doid).Return(dobjName)
@@ -120,9 +120,9 @@ func TestCleanupNamespace(t *testing.T) {
 
 		mockMDS.On("GetRandomDeletedDOIDs", namespace, int64(gcBatchSize)).Return([]uint64{}, nil).Once()
 
-		mockGetDataObject := func(bucket, object string, o minio.ObjectOptions) (DObjReader, error) {
+		mockGetDataObject := func(bucket, object string, o minio.ObjectOptions) (DCReader, error) {
 			file, _ := os.Open(dobjPath)
-			return DObjReader{
+			return DCReader{
 				path:  dobjPath,
 				fpmap: fpMap,
 				filer: file,

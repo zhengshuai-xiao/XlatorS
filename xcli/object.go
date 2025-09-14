@@ -11,10 +11,13 @@ import (
 	"github.com/urfave/cli/v2"
 )
 
-const (
-	G = 1 * 1024 * 1024 * 1024
-)
-
+//   - For size smaller than 128MiB PutObject automatically does a
+//     single atomic Put operation.
+//   - For size larger than 128MiB PutObject automatically does a
+//     multipart Put operation.
+//   - For size input as -1 PutObject does a multipart Put operation
+//     until input stream reaches EOF. Maximum object size that can
+//     be uploaded through this operation will be 5TiB.
 func uploadCmd() *cli.Command {
 	return &cli.Command{
 		Name:  "upload",
@@ -24,7 +27,7 @@ func uploadCmd() *cli.Command {
 			&cli.StringFlag{Name: "local-file", Required: true, Usage: "Path to local file to upload"},
 			&cli.StringFlag{Name: "object-name", Usage: "Name for the object in MinIO (optional, uses local filename if empty)"},
 			&cli.BoolFlag{Name: "disable-multipart", Usage: "Disable multipart upload"},
-			&cli.Uint64Flag{Name: "partSize", Value: G, Usage: "Part size for multipart upload"},
+			&cli.StringFlag{Name: "partSize", Value: "1G", Usage: "Part size for multipart upload (e.g., 64M, 1G)"},
 			&cli.StringFlag{Name: "chunk-method", Value: "FastCDC", Usage: "Chunking algorithm to use (FastCDC or FixedCDC)"},
 		},
 		Action: func(c *cli.Context) error {
@@ -49,8 +52,13 @@ func uploadCmd() *cli.Command {
 				return fmt.Errorf("bucket processing failed: %w", err)
 			}
 
+			partSize, err := parseSize(c.String("partSize"))
+			if err != nil {
+				return fmt.Errorf("invalid partSize: %w", err)
+			}
+
 			start := time.Now()
-			uploadInfo, err := uploadLocalFile(ctx, client, bucketName, objectName, localFile, c.Bool("disable-multipart"), c.Uint64("partSize"), c.String("chunk-method"))
+			uploadInfo, err := uploadLocalFile(ctx, client, bucketName, objectName, localFile, c.Bool("disable-multipart"), partSize, c.String("chunk-method"))
 			if err != nil {
 				return fmt.Errorf("file upload failed: %w", err)
 			}
