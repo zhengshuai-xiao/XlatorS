@@ -14,6 +14,7 @@ package dedup
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/gob"
 	"fmt"
 	"os"
@@ -25,7 +26,10 @@ import (
 )
 
 const (
-	maxContainerSize = 16 * 1024 * 1024
+	maxContainerSize     = 16 * 1024 * 1024
+	DataContainerMagic   = 0x58444346 // "XDCF" - XlatorS Data Container File
+	DataContainerVersion = 1
+	headerSize           = 8 // 4 bytes for magic, 4 for version
 )
 
 // DataContainer represents an active data object being written to disk.
@@ -163,16 +167,22 @@ func (mgr *DataContainerMgr) newContainer() (*DataContainer, error) {
 	if err != nil {
 		return nil, err
 	}
-	if _, err := filer.Write(make([]byte, 8)); err != nil {
+
+	// Write magic number and version
+	header := make([]byte, headerSize)
+	binary.LittleEndian.PutUint32(header[0:4], DataContainerMagic)
+	binary.LittleEndian.PutUint32(header[4:8], uint32(DataContainerVersion))
+	if _, err := filer.Write(header); err != nil {
 		filer.Close()
-		return nil, err
+		return nil, fmt.Errorf("failed to write data container header: %w", err)
 	}
+
 	return &DataContainer{
 		bucket: GetBackendBucketName(mgr.ns),
 		key:    key,
 		path:   path,
 		filer:  filer,
-		offset: 8,
+		offset: headerSize,
 		fps:    []BlockHeader{},
 	}, nil
 }
@@ -180,10 +190,14 @@ func (mgr *DataContainerMgr) newContainer() (*DataContainer, error) {
 // finalizeContainer writes metadata to the container file, closes it, and uploads it.
 func (mgr *DataContainerMgr) finalizeContainer(container *DataContainer) error {
 	defer container.filer.Close()
-	if container.offset <= 8 {
+	// If only the header was written, it's an empty container.
+	if container.offset == headerSize {
 		os.Remove(container.path)
 		return nil
 	}
+
+	// The current offset is where the metadata (gob) will start.
+	metadataOffset := container.offset
 
 	encoder := gob.NewEncoder(container.filer)
 	for _, fp := range container.fps {
@@ -192,9 +206,10 @@ func (mgr *DataContainerMgr) finalizeContainer(container *DataContainer) error {
 		}
 	}
 
-	offsetBytes := internal.UInt64ToBytesLittleEndian(container.offset)
-	if _, err := container.filer.WriteAt(offsetBytes[:], 0); err != nil {
-		return fmt.Errorf("failed to write offset header: %w", err)
+	// Now write the offset of the metadata at the very end of the file.
+	offsetBytes := internal.UInt64ToBytesLittleEndian(metadataOffset)
+	if _, err := container.filer.Write(offsetBytes[:]); err != nil {
+		return fmt.Errorf("failed to write offset footer: %w", err)
 	}
 
 	if mgr.xlator.dsBackendType == DObjBackendS3 {

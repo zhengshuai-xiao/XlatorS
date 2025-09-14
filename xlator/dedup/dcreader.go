@@ -14,6 +14,7 @@ package dedup
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/gob"
 	"fmt"
 	"io"
@@ -105,21 +106,45 @@ func (dr *DCReader) readChunkData(blockHeader BlockHeader, offsetInChunk, bytesT
 
 // parseDataContainer reads the footer of a data container file, decodes the block headers,
 // and populates the DCReader's fpmap.
-func (dr *DCReader) parseDataContainer() (err error) {
-	// parse the file
-	var fpOffsetStr [8]byte
-	_, err = dr.filer.Read(fpOffsetStr[:])
+func (dr *DCReader) parseDataContainer() error {
+	// The metadata offset is stored in the last 8 bytes of the file.
+	fi, err := dr.filer.Stat()
 	if err != nil {
-		logger.Errorf("parseDataContainer: failed to read fpOffsetStr err: %s", err)
-		return
+		return fmt.Errorf("failed to stat data container %s: %w", dr.path, err)
+	}
+	fileSize := fi.Size()
+	if fileSize < headerSize+8 { // Must contain at least header and metadata offset
+		return fmt.Errorf("data container %s is too small to be valid", dr.path)
 	}
 
+	// Read and verify header
+	header := make([]byte, headerSize)
+	if _, err := dr.filer.ReadAt(header, 0); err != nil {
+		return fmt.Errorf("failed to read header from %s: %w", dr.path, err)
+	}
+
+	magic := binary.LittleEndian.Uint32(header[0:4])
+	version := binary.LittleEndian.Uint32(header[4:8])
+
+	if magic != DataContainerMagic {
+		return fmt.Errorf("invalid magic number in %s: got %x, want %x", dr.path, magic, DataContainerMagic)
+	}
+
+	if version != DataContainerVersion {
+		return fmt.Errorf("unsupported data container version in %s: got %d, want %d", dr.path, version, DataContainerVersion)
+	}
+
+	offsetBuf := make([]byte, 8)
+	if _, err := dr.filer.ReadAt(offsetBuf, fileSize-8); err != nil { // Read last 8 bytes
+		return fmt.Errorf("failed to read metadata offset from %s: %w", dr.path, err)
+	}
+
+	fpOffsetStr := [8]byte{}
+	copy(fpOffsetStr[:], offsetBuf)
 	fpOffset := internal.BytesToUInt64LittleEndian(fpOffsetStr)
 	logger.Tracef("parseDataContainer: read fpOffset: %d", fpOffset)
 
-	dr.filer.Seek(int64(fpOffset), 0)
-
-	decoder := gob.NewDecoder(dr.filer)
+	decoder := gob.NewDecoder(io.NewSectionReader(dr.filer, int64(fpOffset), fileSize-int64(fpOffset)-8))
 	for {
 		var blockHeader BlockHeader
 
