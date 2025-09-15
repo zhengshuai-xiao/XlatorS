@@ -6,6 +6,7 @@ import (
 	"path"
 	"path/filepath"
 	"strconv"
+	"syscall"
 
 	mcli "github.com/minio/cli"
 	minio "github.com/minio/minio/cmd"
@@ -321,6 +322,28 @@ func handleBackgroundMode(c *cli.Context) (shouldExit bool, err error) {
 		return false, fmt.Errorf("failed to create log directory %s: %w", logDir, err)
 	}
 
+	pidFile := filepath.Join(logDir, "xlators.pid")
+	// Check for stale PID file before attempting to daemonize.
+	if _, statErr := os.Stat(pidFile); statErr == nil {
+		pid, readErr := daemon.ReadPidFile(pidFile)
+		if readErr == nil {
+			proc, findErr := os.FindProcess(pid)
+			if findErr == nil {
+				// Sending signal 0 to a process on POSIX systems checks if it exists.
+				if err := proc.Signal(syscall.Signal(0)); err != nil {
+					// Process does not exist, so the PID file is stale.
+					logger.Warnf("Found stale PID file for dead process %d. Removing it.", pid)
+					if err := os.Remove(pidFile); err != nil {
+						return false, fmt.Errorf("failed to remove stale PID file %s: %w", pidFile, err)
+					}
+				} else {
+					// Process exists, so we cannot start a new daemon.
+					return false, fmt.Errorf("daemon already running with PID %d", pid)
+				}
+			}
+		}
+	}
+
 	// The arguments for the child process should be the same as the current one,
 	// but without the --background flag to avoid an infinite loop.
 	var newArgs []string
@@ -331,7 +354,7 @@ func handleBackgroundMode(c *cli.Context) (shouldExit bool, err error) {
 	}
 
 	d, err := daemon.Daemonize(
-		filepath.Join(logDir, "xlators.pid"),
+		pidFile,
 		filepath.Join(logDir, "xlator-"+c.String("xlator")+".log"),
 		newArgs,
 	)

@@ -84,9 +84,9 @@ func (x *XlatorDedup) writeObj(ctx context.Context, ns string, r *minio.PutObjRe
 			chunkPtrsToUpdate := make(map[int]*Chunk)
 
 			for i := range chunks {
-				if doid, ok := localFPCache[chunks[i].FP]; ok {
+				if dcid, ok := localFPCache[chunks[i].FP]; ok {
 					chunks[i].Deduped = true
-					chunks[i].DOid = doid
+					chunks[i].DCID = dcid
 					logger.Tracef("writeObj: local FP cache hit for fp: %s", internal.StringToHex(chunks[i].FP))
 				} else {
 					chunksToBatch = append(chunksToBatch, chunks[i])
@@ -103,9 +103,9 @@ func (x *XlatorDedup) writeObj(ctx context.Context, ns string, r *minio.PutObjRe
 				for i, resultChunk := range chunksToBatch {
 					originalChunkPtr := chunkPtrsToUpdate[i]
 					originalChunkPtr.Deduped = resultChunk.Deduped
-					originalChunkPtr.DOid = resultChunk.DOid
+					originalChunkPtr.DCID = resultChunk.DCID
 					if resultChunk.Deduped {
-						localFPCache[resultChunk.FP] = resultChunk.DOid
+						localFPCache[resultChunk.FP] = resultChunk.DCID
 					}
 				}
 			}
@@ -122,7 +122,7 @@ func (x *XlatorDedup) writeObj(ctx context.Context, ns string, r *minio.PutObjRe
 			// Update local cache with newly written chunks for intra-object dedup.
 			for i := range chunks {
 				if !chunks[i].Deduped {
-					localFPCache[chunks[i].FP] = chunks[i].DOid
+					localFPCache[chunks[i].FP] = chunks[i].DCID
 				}
 			}
 
@@ -131,7 +131,7 @@ func (x *XlatorDedup) writeObj(ctx context.Context, ns string, r *minio.PutObjRe
 				manifestList = append(manifestList, ChunkInManifest{
 					FP:   chunk.FP,
 					Len:  chunk.Len, // chunk.Len now correctly holds the original length
-					DOid: chunk.DOid,
+					DCID: chunk.DCID,
 				})
 			}
 
@@ -209,9 +209,9 @@ func (x *XlatorDedup) writePart(ctx context.Context, ns string, r *minio.PutObjR
 			chunkPtrsToUpdate := make(map[int]*Chunk)
 
 			for i := range chunks {
-				if doid, ok := localFPCache[chunks[i].FP]; ok {
+				if dcid, ok := localFPCache[chunks[i].FP]; ok {
 					chunks[i].Deduped = true
-					chunks[i].DOid = doid
+					chunks[i].DCID = dcid
 					logger.Tracef("writePart: local FP cache hit for fp: %s", internal.StringToHex(chunks[i].FP))
 				} else {
 					chunksToBatch = append(chunksToBatch, chunks[i])
@@ -228,9 +228,9 @@ func (x *XlatorDedup) writePart(ctx context.Context, ns string, r *minio.PutObjR
 				for i, resultChunk := range chunksToBatch {
 					originalChunkPtr := chunkPtrsToUpdate[i]
 					originalChunkPtr.Deduped = resultChunk.Deduped
-					originalChunkPtr.DOid = resultChunk.DOid
+					originalChunkPtr.DCID = resultChunk.DCID
 					if resultChunk.Deduped {
-						localFPCache[resultChunk.FP] = resultChunk.DOid
+						localFPCache[resultChunk.FP] = resultChunk.DCID
 					}
 				}
 			}
@@ -244,7 +244,7 @@ func (x *XlatorDedup) writePart(ctx context.Context, ns string, r *minio.PutObjR
 
 			for i := range chunks {
 				if !chunks[i].Deduped {
-					localFPCache[chunks[i].FP] = chunks[i].DOid
+					localFPCache[chunks[i].FP] = chunks[i].DCID
 				}
 			}
 
@@ -252,7 +252,7 @@ func (x *XlatorDedup) writePart(ctx context.Context, ns string, r *minio.PutObjR
 				manifestList = append(manifestList, ChunkInManifest{
 					FP:   chunk.FP,
 					Len:  chunk.Len, // chunk.Len now correctly holds the original length
-					DOid: chunk.DOid,
+					DCID: chunk.DCID,
 				})
 			}
 			chunks = nil
@@ -277,7 +277,7 @@ func (x *XlatorDedup) writePart(ctx context.Context, ns string, r *minio.PutObjR
 	return totalSize, totalWriteSize, manifestList, nil
 }
 
-func (x *XlatorDedup) getDobjPathFromLocal(dobj_key string) string {
+func (x *XlatorDedup) getDCPathFromLocal(dc_key string) string {
 	//read data from object
-	return filepath.Join(x.dobjCachePath, dobj_key)
+	return filepath.Join(x.dcCachePath, dc_key)
 }

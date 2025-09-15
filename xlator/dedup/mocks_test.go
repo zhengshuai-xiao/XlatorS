@@ -25,18 +25,8 @@ func (m *MockMDS) Shutdown() error {
 	return args.Error(0)
 }
 
-func (m *MockMDS) GetIncreasedDOID() (int64, error) {
+func (m *MockMDS) GetIncreasedDCID() (int64, error) {
 	args := m.Called()
-	return args.Get(0).(int64), args.Error(1)
-}
-
-func (m *MockMDS) GetDObjNameInMDS(doid uint64) string {
-	args := m.Called(doid)
-	return args.String(0)
-}
-
-func (m *MockMDS) GetDOIDFromDObjName(dobjName string) (int64, error) {
-	args := m.Called(dobjName)
 	return args.Get(0).(int64), args.Error(1)
 }
 
@@ -55,8 +45,8 @@ func (m *MockMDS) InsertFPsBatch(ns string, chunks []ChunkInManifest) error {
 	return args.Error(0)
 }
 
-func (m *MockMDS) RemoveFPs(ns string, fps []string, doid uint64) error {
-	args := m.Called(ns, fps, doid)
+func (m *MockMDS) RemoveFPs(ns string, fps []string, dcid uint64) error {
+	args := m.Called(ns, fps, dcid)
 	return args.Error(0)
 }
 
@@ -85,8 +75,8 @@ func (m *MockMDS) ListBuckets() ([]minio.BucketInfo, error) {
 	return args.Get(0).([]minio.BucketInfo), args.Error(1)
 }
 
-func (m *MockMDS) PutObjectMeta(objInfo minio.ObjectInfo, uniqueDOidlist []uint64) error {
-	args := m.Called(objInfo, uniqueDOidlist)
+func (m *MockMDS) PutObjectMeta(objInfo minio.ObjectInfo, uniqueDCIDlist []uint64) error {
+	args := m.Called(objInfo, uniqueDCIDlist)
 	return args.Error(0)
 }
 
@@ -145,18 +135,18 @@ func (m *MockMDS) GetManifest(manifestid string) ([]ChunkInManifest, error) {
 	return args.Get(0).([]ChunkInManifest), args.Error(1)
 }
 
-func (m *MockMDS) AddReference(namespace string, dataObjectIDs []uint64, objectName string) error {
-	args := m.Called(namespace, dataObjectIDs, objectName)
+func (m *MockMDS) AddReference(namespace string, dataContainerIDs []uint64, objectName string) error {
+	args := m.Called(namespace, dataContainerIDs, objectName)
 	return args.Error(0)
 }
 
-func (m *MockMDS) RemoveReference(namespace string, dataObjectIDs []uint64, objectName string) ([]uint64, error) {
-	args := m.Called(namespace, dataObjectIDs, objectName)
+func (m *MockMDS) RemoveReference(namespace string, dataContainerIDs []uint64, objectName string) ([]uint64, error) {
+	args := m.Called(namespace, dataContainerIDs, objectName)
 	return args.Get(0).([]uint64), args.Error(1)
 }
 
-func (m *MockMDS) IsDOIDDeleted(namespace string, doid uint64) (bool, error) {
-	args := m.Called(namespace, doid)
+func (m *MockMDS) IsDCIDDeleted(namespace string, dcid uint64) (bool, error) {
+	args := m.Called(namespace, dcid)
 	return args.Bool(0), args.Error(1)
 }
 
@@ -174,7 +164,7 @@ func (m *MockMDS) GetAllNamespaces() ([]string, error) {
 	}
 	return r0, args.Error(1)
 }
-func (m *MockMDS) GetRandomDeletedDOIDs(namespace string, count int64) ([]uint64, error) {
+func (m *MockMDS) GetRandomDeletedDCIDs(namespace string, count int64) ([]uint64, error) {
 	args := m.Called(namespace, count)
 	var r0 []uint64
 	if args.Get(0) != nil {
@@ -182,11 +172,11 @@ func (m *MockMDS) GetRandomDeletedDOIDs(namespace string, count int64) ([]uint64
 	}
 	return r0, args.Error(1)
 }
-func (m *MockMDS) RemoveSpecificDeletedDOIDs(namespace string, doids []uint64) error {
-	args := m.Called(namespace, doids)
+func (m *MockMDS) RemoveSpecificDeletedDCIDs(namespace string, dcids []uint64) error {
+	args := m.Called(namespace, dcids)
 	return args.Error(0)
 }
-func (m *MockMDS) AddDeletedDOIDs(namespace string, doids []uint64) error {
-	args := m.Called(namespace, doids)
+func (m *MockMDS) AddDeletedDCIDs(namespace string, dcids []uint64) error {
+	args := m.Called(namespace, dcids)
 	return args.Error(0)
 }

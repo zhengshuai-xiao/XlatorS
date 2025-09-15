@@ -25,13 +25,13 @@ func DeserializeFromFile(file *os.File, data interface{}) (err error) {
 	return nil
 }
 
-func WriteAll(file *os.File, buf []byte) (int, error) {
+func WriteAll(writer io.Writer, buf []byte) (int, error) {
 	total := 0
 	remaining := len(buf)
 	for remaining > 0 {
-		n, err := file.Write(buf[total:])
+		n, err := writer.Write(buf[total:])
 		if err != nil {
-			return total, fmt.Errorf("failed to write file: %w", err)
+			return total, fmt.Errorf("failed to write: %w", err)
 		}
 
 		total += n

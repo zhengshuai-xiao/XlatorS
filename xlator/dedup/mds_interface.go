@@ -6,7 +6,7 @@ import (
 
 const (
 	manifestKey = "DatamanifestID"
-	doidkey     = "DataObjID" //data object
+	dcidkey     = "DataContainerID" //data container
 )
 
 type MDS interface {
@@ -21,13 +21,11 @@ type MDS interface {
 	ListBuckets() ([]minio.BucketInfo, error)
 	ListObjects(bucket string, prefix string) ([]minio.ObjectInfo, error)
 	DelObjectMeta(bucket string, obj string) error
-	PutObjectMeta(object minio.ObjectInfo, uniqueDOidlist []uint64) error
+	PutObjectMeta(object minio.ObjectInfo, uniqueDCIDlist []uint64) error
 	GetObjectMeta(object *minio.ObjectInfo) error
 	GetObjectInfo(bucket string, obj string) (minio.ObjectInfo, error)
 	BucketExist(bucket string) (bool, error)
-	GetIncreasedDOID() (int64, error)
-	GetDObjNameInMDS(id uint64) string
-	GetDOIDFromDObjName(string) (int64, error)
+	GetIncreasedDCID() (int64, error)
 	GetIncreasedManifestID() (string, error)
 	InitMultipartUpload(uploadID string, objInfo minio.ObjectInfo) error
 	GetMultipartUploadInfo(uploadID string) (minio.ObjectInfo, error)
@@ -38,13 +36,13 @@ type MDS interface {
 	DedupFPsBatch(namespace string, chunks []Chunk) error
 	InsertFPs(namespace string, chunks []ChunkInManifest) error
 	InsertFPsBatch(namespace string, chunks []ChunkInManifest) error
-	AddReference(namespace string, dataObjectIDs []uint64, objectName string) error
-	RemoveReference(namespace string, dataObjectIDs []uint64, objectName string) (dereferencedDObjIDs []uint64, err error)
-	RemoveFPs(namespace string, FPs []string, DOid uint64) error
-	AddDeletedDOIDs(namespace string, doids []uint64) error
-	GetRandomDeletedDOIDs(namespace string, count int64) ([]uint64, error)
-	RemoveSpecificDeletedDOIDs(namespace string, doids []uint64) error
+	AddReference(namespace string, dataContainerIDs []uint64, objectName string) error
+	RemoveReference(namespace string, dataContainerIDs []uint64, objectName string) (dereferencedDCIDs []uint64, err error)
+	RemoveFPs(namespace string, FPs []string, DCID uint64) error
+	AddDeletedDCIDs(namespace string, dcids []uint64) error
+	GetRandomDeletedDCIDs(namespace string, count int64) ([]uint64, error)
+	RemoveSpecificDeletedDCIDs(namespace string, dcids []uint64) error
 	GetAllNamespaces() ([]string, error)
-	IsDOIDDeleted(namespace string, doid uint64) (bool, error)
+	IsDCIDDeleted(namespace string, dcid uint64) (bool, error)
 	NewRedisLock(bucket string, objects ...string) minio.RWLocker
 }

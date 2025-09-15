@@ -18,8 +18,9 @@ func setupTestXlator(t *testing.T) (*XlatorDedup, *MockMDS, func()) {
 
 	xlator := &XlatorDedup{
 		Mdsclient:     mockMDS,
-		dobjCachePath: cacheDir,
+		dcCachePath:   cacheDir,
 		dsBackendType: DObjBackendPOSIX, // Use POSIX for most tests to avoid S3 dependency
+		dcBackend:     &POSIXBackend{dcCachePath: cacheDir},
 	}
 
 	teardown := func() {

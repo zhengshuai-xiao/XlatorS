@@ -27,7 +27,7 @@
 ### 命令语法
 
 ```shell
-bin/xcli backup --bucket <bucket-name> --object-base-name <backup-name> [要备份的路径1] [要备份的路径2] ...
+bin/xcli backup --bucket <bucket-name> --src-dir <directory-to-backup>
 ```
 
 - `--bucket`: 用于存储备份的目标 S3 存储桶。

@@ -21,12 +21,12 @@ func restoreCmd() *cli.Command {
 		ArgsUsage: "[files/dirs to restore...]",
 		Flags: []cli.Flag{
 			&cli.StringFlag{Name: "bucket", Required: true, Usage: "Source bucket name"},
-			&cli.StringFlag{Name: "object-base-name", Required: true, Usage: "Base name of the backup objects (without .DATA or .HDR suffix)"},
+			&cli.StringFlag{Name: "backup-id", Required: true, Usage: "The ID of the backup to restore"},
 			&cli.StringFlag{Name: "dest-dir", Required: true, Usage: "Destination directory to restore files to"},
 		},
 		Action: func(c *cli.Context) error {
 			bucketName := c.String("bucket")
-			baseName := c.String("object-base-name")
+			backupID := c.String("backup-id")
 			destDir := c.String("dest-dir")
 
 			// 1. Create destination directory if it doesn't exist
@@ -41,8 +41,8 @@ func restoreCmd() *cli.Command {
 			}
 
 			ctx := c.Context
-			hdrObjectName := baseName + ".HDR"
-			dataObjectName := baseName + ".DATA"
+			hdrObjectName := backupID + ".HDR"
+			dataObjectName := backupID + ".DATA"
 
 			// 3. Download and parse the HDR manifest object
 			log.Printf("Downloading manifest: %s", hdrObjectName)

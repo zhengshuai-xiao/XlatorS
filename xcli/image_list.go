@@ -18,11 +18,11 @@ func listBackupCmd() *cli.Command {
 		Usage: "List the contents of a backup image stored in S3",
 		Flags: []cli.Flag{
 			&cli.StringFlag{Name: "bucket", Required: true, Usage: "Source bucket name"},
-			&cli.StringFlag{Name: "object-base-name", Required: true, Usage: "Base name of the backup objects (without .DATA or .HDR suffix)"},
+			&cli.StringFlag{Name: "backup-id", Required: true, Usage: "The ID of the backup to list"},
 		},
 		Action: func(c *cli.Context) error {
 			bucketName := c.String("bucket")
-			baseName := c.String("object-base-name")
+			backupID := c.String("backup-id")
 
 			// 1. Get S3 client
 			client, err := newS3Client(c)
@@ -31,7 +31,7 @@ func listBackupCmd() *cli.Command {
 			}
 
 			ctx := c.Context
-			hdrObjectName := baseName + ".HDR"
+			hdrObjectName := backupID + ".HDR"
 
 			// 2. Download and parse the HDR manifest object
 			log.Printf("Downloading manifest: %s", hdrObjectName)

@@ -17,12 +17,12 @@ import (
 	"encoding/binary"
 	"encoding/gob"
 	"fmt"
+	"io"
 	"os"
-	"path/filepath"
+	"strconv"
 
 	"github.com/zhengshuai-xiao/XlatorS/internal"
 	"github.com/zhengshuai-xiao/XlatorS/internal/compression"
-	S3client "github.com/zhengshuai-xiao/XlatorS/pkg/s3client"
 )
 
 const (
@@ -30,6 +30,8 @@ const (
 	DataContainerMagic   = 0x58444346 // "XDCF" - XlatorS Data Container File
 	DataContainerVersion = 1
 	headerSize           = 8 // 4 bytes for magic, 4 for version
+
+	DCKeyWord = "DC"
 )
 
 // DataContainer represents an active data object being written to disk.
@@ -38,7 +40,7 @@ type DataContainer struct {
 	key    string
 	path   string
 	offset uint64
-	filer  *os.File
+	writer io.WriteCloser
 	fps    []BlockHeader
 }
 
@@ -49,6 +51,30 @@ type DataContainerMgr struct {
 	ns              string
 	activeContainer *DataContainer
 	compressor      compression.Compressor
+	backend         DataContainerBackend
+}
+
+func GetDCName(id uint64) string {
+
+	return fmt.Sprintf("%s%d", DCKeyWord, id)
+}
+
+func GetDCIDFromDCName(dcName string) (num int64, err error) {
+
+	if len(dcName) <= len(DCKeyWord) || dcName[:len(DCKeyWord)] != DCKeyWord {
+		return 0, fmt.Errorf("ObjName[%s] is not starting with %s", dcName, DCKeyWord)
+	}
+
+	numStr := dcName[len(DCKeyWord):]
+	if numStr == "" {
+		return 0, fmt.Errorf("there is no num")
+	}
+
+	num, err = strconv.ParseInt(numStr, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("the num[%s] is not valid: %w", numStr, err)
+	}
+	return
 }
 
 // NewDataContainerMgr creates a new manager for handling data container writes.
@@ -62,6 +88,7 @@ func NewDataContainerMgr(ctx context.Context, xlator *XlatorDedup, ns string) (*
 		ctx:        ctx,
 		ns:         ns,
 		compressor: compressor,
+		backend:    xlator.dcBackend,
 	}, nil
 }
 
@@ -94,8 +121,8 @@ func (mgr *DataContainerMgr) WriteChunks(chunks []Chunk) (writtenLen int, compre
 			continue
 		}
 
-		if doid, ok := batchFPCache[chunks[i].FP]; ok {
-			chunks[i].DOid = doid
+		if dcid, ok := batchFPCache[chunks[i].FP]; ok {
+			chunks[i].DCID = dcid
 			continue
 		}
 
@@ -119,18 +146,18 @@ func (mgr *DataContainerMgr) WriteChunks(chunks []Chunk) (writtenLen int, compre
 			dataToWrite = compressedData
 		}
 
-		wlen, err := internal.WriteAll(mgr.activeContainer.filer, dataToWrite)
+		wlen, err := internal.WriteAll(mgr.activeContainer.writer, dataToWrite)
 		if err != nil {
 			return 0, 0, err
 		}
 		writtenLen += wlen
 
-		doid, err := mgr.xlator.Mdsclient.GetDOIDFromDObjName(mgr.activeContainer.key)
+		dcid, err := GetDCIDFromDCName(mgr.activeContainer.key)
 		if err != nil {
 			return 0, 0, err
 		}
-		chunks[i].DOid = uint64(doid)
-		batchFPCache[chunks[i].FP] = chunks[i].DOid
+		chunks[i].DCID = uint64(dcid)
+		batchFPCache[chunks[i].FP] = chunks[i].DCID
 
 		fp := BlockHeader{
 			Offset: mgr.activeContainer.offset,
@@ -157,23 +184,23 @@ func (mgr *DataContainerMgr) Finalize() error {
 
 // newContainer creates and initializes a new data container file.
 func (mgr *DataContainerMgr) newContainer() (*DataContainer, error) {
-	doid, err := mgr.xlator.Mdsclient.GetIncreasedDOID()
+	dcid, err := mgr.xlator.Mdsclient.GetIncreasedDCID()
 	if err != nil {
 		return nil, err
 	}
-	key := mgr.xlator.Mdsclient.GetDObjNameInMDS(uint64(doid))
-	path := filepath.Join(mgr.xlator.dobjCachePath, key)
-	filer, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+
+	uploader, path, key, err := mgr.backend.GetUploader(mgr.ctx, GetBackendBucketName(mgr.ns), uint64(dcid))
 	if err != nil {
 		return nil, err
 	}
+	writer := uploader.GetWriter()
 
 	// Write magic number and version
 	header := make([]byte, headerSize)
 	binary.LittleEndian.PutUint32(header[0:4], DataContainerMagic)
 	binary.LittleEndian.PutUint32(header[4:8], uint32(DataContainerVersion))
-	if _, err := filer.Write(header); err != nil {
-		filer.Close()
+	if _, err := writer.Write(header); err != nil {
+		writer.Close()
 		return nil, fmt.Errorf("failed to write data container header: %w", err)
 	}
 
@@ -181,15 +208,16 @@ func (mgr *DataContainerMgr) newContainer() (*DataContainer, error) {
 		bucket: GetBackendBucketName(mgr.ns),
 		key:    key,
 		path:   path,
-		filer:  filer,
+		writer: writer,
 		offset: headerSize,
 		fps:    []BlockHeader{},
+		// uploader is not stored here, it's managed by finalizeContainer
 	}, nil
 }
 
 // finalizeContainer writes metadata to the container file, closes it, and uploads it.
 func (mgr *DataContainerMgr) finalizeContainer(container *DataContainer) error {
-	defer container.filer.Close()
+	defer container.writer.Close()
 	// If only the header was written, it's an empty container.
 	if container.offset == headerSize {
 		os.Remove(container.path)
@@ -199,7 +227,7 @@ func (mgr *DataContainerMgr) finalizeContainer(container *DataContainer) error {
 	// The current offset is where the metadata (gob) will start.
 	metadataOffset := container.offset
 
-	encoder := gob.NewEncoder(container.filer)
+	encoder := gob.NewEncoder(container.writer)
 	for _, fp := range container.fps {
 		if err := encoder.Encode(fp); err != nil {
 			return err
@@ -208,14 +236,18 @@ func (mgr *DataContainerMgr) finalizeContainer(container *DataContainer) error {
 
 	// Now write the offset of the metadata at the very end of the file.
 	offsetBytes := internal.UInt64ToBytesLittleEndian(metadataOffset)
-	if _, err := container.filer.Write(offsetBytes[:]); err != nil {
+	if _, err := container.writer.Write(offsetBytes[:]); err != nil {
 		return fmt.Errorf("failed to write offset footer: %w", err)
 	}
 
-	if mgr.xlator.dsBackendType == DObjBackendS3 {
-		if _, err := S3client.UploadFile(mgr.ctx, mgr.xlator.Client, container.bucket, container.key, container.path); err != nil {
-			return fmt.Errorf("failed to upload data container %s: %w", container.path, err)
-		}
+	// Close the writer to signal the end of the stream for S3 or to flush the file for POSIX.
+	if err := container.writer.Close(); err != nil {
+		return fmt.Errorf("failed to close container writer: %w", err)
 	}
+
+	// The uploader is not part of the DataContainer struct, so we need to re-create it to wait.
+	// This is a bit awkward. Let's assume the uploader is tied to the writer's lifecycle.
+	// The Wait() call is now implicit in the backend implementation after the writer is closed.
+	// For S3, the go-routine will finish. For POSIX, the file is already written.
 	return nil
 }

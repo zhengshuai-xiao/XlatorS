@@ -36,7 +36,7 @@ XlatorS 系统主要由三大核心组件构成：**XlatorS 集群**、**元数�
 
 * **XlatorS 集群**: 作为系统的核心处理层，由一个或多个无状态的 XlatorS 节点组成。所有来自客户端的 S3 请求都会经过 XlatorS 节点，数据流会被指定的翻译器（如 Dedup Xlator）进行处理，处理后的数据和元数据分别存入后端存储和元数据引擎。其无状态特性使得集群可以轻松地进行水平扩展和缩容。
 * **元数据引擎 (MetaData Engine)**: 负责存储系统的所有元数据。对于去重场景，它存储了包括虚拟桶与对象信息、数据块指纹（Fingerprint）到数据对象（Data Object）的映射、数据对象的引用计数等关键信息。目前主要使用 **Redis** 作为元数据引擎，以保证高性能的读写。
-* **后端对象存储 (Data Storage)**: 负责持久化存储经过翻译器处理后的数据。在去重场景下，这里存储的是由多个唯一数据块（Chunk）打包而成的数据对象（DObj）。任何兼容 S3 协议的对象存储（如 MinIO）都可以作为后端。
+* **后端对象存储 (Data Storage)**: 负责持久化存储经过翻译器处理后的数据。在去重场景下，这里存储的是由多个唯一数据块（Chunk）打包而成的数据容器（Data Container）。任何兼容 S3 协议的对象存储（如 MinIO）都可以作为后端。
 
 ### Dedup Xlator 架构
 
@@ -94,9 +94,9 @@ export XL_DEDUP_FASTCDC_AVG_SIZE=131072  # 128KiB
 export XL_DEDUP_FASTCDC_MAX_SIZE=262144  # 256KiB
 
 # 4. 运行 XlatorS Dedup服务
-#    --ds-backend: 数据块 (DObj) 的后端存储类型。
-#                  "posix" (默认): 数据块仅存储在本地 POSIX 文件系统。
-#                  "s3": 数据块存储在本地，并上传到后端的 S3 存储。
+#    --ds-backend: 数据容器 (Data Container) 的后端存储类型。
+#                  "posix" (默认): 数据容器仅存储在本地 POSIX 文件系统。
+#                  "s3": 数据容器存储在本地，并上传到后端的 S3 存储。
 
 启动后端存储为本地的Dedup服务
 ./bin/xlators gateway  --xlator Dedup --ds-backend posix --meta-addr 127.0.0.1:6379/1 --loglevel trace --downloadCache /dedup_data/

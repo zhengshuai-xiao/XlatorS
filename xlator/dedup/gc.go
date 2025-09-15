@@ -33,7 +33,7 @@ const (
 func (x *XlatorDedup) listenForAdminCommands() {
 	// Type assert Mdsclient to access the underlying Redis client.
 	mdsRedis, ok := x.Mdsclient.(*MDSRedis)
-	if !ok {
+	if !ok { //TODO:
 		logger.Error("Cannot start admin command listener: Mdsclient is not of type *MDSRedis")
 		return
 	}
@@ -119,47 +119,47 @@ func (x *XlatorDedup) cleanupNamespace(ctx context.Context, namespace string, ge
 
 	for {
 		// Step 1: Get a batch of DOIDs without removing them from the set to avoid race conditions.
-		doids, err := x.Mdsclient.GetRandomDeletedDOIDs(namespace, gcBatchSize)
+		dcids, err := x.Mdsclient.GetRandomDeletedDCIDs(namespace, gcBatchSize)
 		if err != nil {
-			logger.Errorf("GC: failed to get deleted DOIDs for namespace %s: %v", namespace, err)
+			logger.Errorf("GC: failed to get deleted DCIDs for namespace %s: %v", namespace, err)
 			return
 		}
-		if len(doids) == 0 {
-			logger.Infof("GC: no more DOIDs to process for namespace %s.", namespace)
+		if len(dcids) == 0 {
+			logger.Infof("GC: no more DCIDs to process for namespace %s.", namespace)
 			return
 		}
 
-		logger.Infof("GC: processing %d DOIDs for namespace %s.", len(doids), namespace)
+		logger.Infof("GC: processing %d DCIDs for namespace %s.", len(dcids), namespace)
 
-		var successfullyCleanedDoids []uint64
-		for _, doid := range doids {
-			dobjName := x.Mdsclient.GetDObjNameInMDS(doid)
+		var successfullyCleanedDCIDs []uint64
+		for _, dcid := range dcids {
+			dcName := GetDCName(dcid)
 
 			// 1. Get FPs from data object
-			dobjReader, err := getDataObjectFunc(backendBucket, dobjName, minio.ObjectOptions{})
+			dcReader, err := getDataObjectFunc(backendBucket, dcName, minio.ObjectOptions{})
 			if err != nil {
 				resp, isS3Err := err.(miniogo.ErrorResponse)
 				// If the object is not found (either on S3 or local disk), we can assume it's already been cleaned up.
 				if (isS3Err && resp.Code == "NoSuchKey") || os.IsNotExist(err) {
-					logger.Warnf("GC: data object %s/%s not found. Assuming already deleted.", backendBucket, dobjName)
+					logger.Warnf("GC: data container for DCID %d not found. Assuming already deleted.", dcid)
 					// This DOID can be removed from the GC set.
-					successfullyCleanedDoids = append(successfullyCleanedDoids, doid)
+					successfullyCleanedDCIDs = append(successfullyCleanedDCIDs, dcid)
 				} else {
 					// For any other error, log it and retry later.
-					logger.Errorf("GC: failed to get data object %s/%s: %v. Will retry later.", backendBucket, dobjName, err)
+					logger.Errorf("GC: failed to get data container %s/%s: %v. Will retry later.", backendBucket, dcName, err)
 				}
 				continue // Move to the next DOID
 			}
 
 			// 2. Remove FPs from cache
-			if dobjReader.fpmap != nil {
-				fps := make([]string, 0, len(dobjReader.fpmap))
-				for fpStr := range dobjReader.fpmap {
+			if dcReader.fpmap != nil {
+				fps := make([]string, 0, len(dcReader.fpmap))
+				for fpStr := range dcReader.fpmap {
 					fps = append(fps, fpStr)
 				}
 				if len(fps) > 0 {
-					if err := x.Mdsclient.RemoveFPs(namespace, fps, doid); err != nil {
-						logger.Errorf("GC: failed to remove FPs for DOID %d: %v. Will retry later.", doid, err)
+					if err := x.Mdsclient.RemoveFPs(namespace, fps, dcid); err != nil {
+						logger.Errorf("GC: failed to remove FPs for DCID %d: %v. Will retry later.", dcid, err)
 						// The file handle will be closed by the deferred call below.
 						continue // Move to the next DOID
 					}
@@ -167,43 +167,28 @@ func (x *XlatorDedup) cleanupNamespace(ctx context.Context, namespace string, ge
 			}
 
 			// Defer the closing of the file handle to ensure it's closed on all paths for this DOID.
-			if dobjReader.filer != nil { // nolint:ifshort
-				defer dobjReader.filer.Close()
+			if dcReader.filer != nil { // nolint:ifshort
+				defer dcReader.filer.Close()
 			}
 
 			// 3. Delete data object from backend
-			if x.dsBackendType == DObjBackendS3 {
-				if x.Client == nil {
-					logger.Errorf("GC: S3 backend is configured, but S3 client is not initialized. Skipping deletion of %s/%s.", backendBucket, dobjName)
-					continue
-				}
-				err = x.Client.RemoveObject(ctx, backendBucket, dobjName, miniogo.RemoveObjectOptions{})
-				if err != nil {
-					if resp, ok := err.(miniogo.ErrorResponse); !ok || resp.Code != "NoSuchKey" { // nolint:staticcheck
-						logger.Errorf("GC: failed to remove data object %s/%s from S3 backend: %v. Will retry later.", backendBucket, dobjName, err)
-						continue // Move to the next DOID
-					}
-				}
+			err = x.dcBackend.Delete(ctx, backendBucket, dcid)
+			if err != nil && !os.IsNotExist(err) {
+				logger.Errorf("GC: failed to delete data container for DCID %d from backend: %v. Will retry later.", dcid, err)
+				continue
 			}
 
-			// 4. Delete local file (which is either the primary storage or a cache)
-			if dobjReader.path != "" {
-				if err := os.Remove(dobjReader.path); err != nil && !os.IsNotExist(err) {
-					logger.Warnf("GC: failed to remove local cache file %s: %v", dobjReader.path, err)
-				}
-			}
-
-			logger.Infof("GC: successfully processed DOID %d (%s/%s) for cleanup.", doid, backendBucket, dobjName)
-			successfullyCleanedDoids = append(successfullyCleanedDoids, doid)
+			logger.Infof("GC: successfully processed DCID %d for cleanup.", dcid)
+			successfullyCleanedDCIDs = append(successfullyCleanedDCIDs, dcid)
 		}
 
 		// Step 2: After processing the batch, remove the successfully cleaned DOIDs from the set.
-		if len(successfullyCleanedDoids) > 0 {
-			if err := x.Mdsclient.RemoveSpecificDeletedDOIDs(namespace, successfullyCleanedDoids); err != nil {
-				logger.Errorf("GC: CRITICAL: failed to remove %d processed DOIDs from set for namespace %s: %v", len(successfullyCleanedDoids), namespace, err)
+		if len(successfullyCleanedDCIDs) > 0 {
+			if err := x.Mdsclient.RemoveSpecificDeletedDCIDs(namespace, successfullyCleanedDCIDs); err != nil {
+				logger.Errorf("GC: CRITICAL: failed to remove %d processed DCIDs from set for namespace %s: %v", len(successfullyCleanedDCIDs), namespace, err)
 				// These DOIDs will be re-processed, which is safe but inefficient.
 			} else {
-				logger.Infof("GC: successfully removed %d processed DOIDs from GC set for namespace %s.", len(successfullyCleanedDoids), namespace)
+				logger.Infof("GC: successfully removed %d processed DCIDs from GC set for namespace %s.", len(successfullyCleanedDCIDs), namespace)
 			}
 		}
 	}

@@ -17,7 +17,7 @@ type Chunk struct {
 	Data    []byte // Chunk data, valid for the lifetime of the chunk
 	Len     uint64
 	Deduped bool
-	DOid    uint64
+	DCID    uint64
 	//OffInDOid uint64
 	//LenInDOid uint64
 }
@@ -29,13 +29,13 @@ type PartInfoWithStats struct {
 type ChunkInManifest struct {
 	FP   string
 	Len  uint64
-	DOid uint64
+	DCID uint64
 	//OffInDOid uint64
 	//LenInDOid uint64
 }
 
 type FPValInMDS struct {
-	DOid uint64
+	DCID uint64
 	//OffInDOid uint64
 	//LenInDOid uint64
 }

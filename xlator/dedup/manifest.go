@@ -32,7 +32,7 @@ func (x *XlatorDedup) getManifestPath(manifestID string) (string, error) {
 	if len(manifestID) < 4 {
 		return "", fmt.Errorf("invalid manifest ID: %s", manifestID)
 	}
-	dir := filepath.Join(x.dobjCachePath, "manifests")
+	dir := filepath.Join(x.dcCachePath, "manifests")
 	return filepath.Join(dir, manifestID), nil
 }
 
@@ -50,7 +50,7 @@ func (x *XlatorDedup) writeManifest(ctx context.Context, namespace string, manif
 	}
 
 	var buf bytes.Buffer
-	uniqueDoids := internal.NewUInt64Set()
+	uniqueDCIDs := internal.NewUInt64Set()
 
 	for _, chunk := range manifestList {
 		// FP (32 bytes)
@@ -58,18 +58,18 @@ func (x *XlatorDedup) writeManifest(ctx context.Context, namespace string, manif
 		// Len (8 bytes)
 		lenBytes := internal.UInt64ToBytesLittleEndian(chunk.Len)
 		buf.Write(lenBytes[:])
-		// DOid (8 bytes)
-		doidBytes := internal.UInt64ToBytesLittleEndian(chunk.DOid)
-		buf.Write(doidBytes[:])
+		// DCID (8 bytes)
+		dcidBytes := internal.UInt64ToBytesLittleEndian(chunk.DCID)
+		buf.Write(dcidBytes[:])
 
-		uniqueDoids.Add(chunk.DOid)
+		uniqueDCIDs.Add(chunk.DCID)
 	}
 
-	dobjIdOffset := uint64(buf.Len())
+	dcidOffset := uint64(buf.Len())
 
-	uniqueDoidList := uniqueDoids.Elements()
-	for _, doid := range uniqueDoidList {
-		doidBytes := internal.UInt64ToBytesLittleEndian(doid)
+	uniqueDCIDList := uniqueDCIDs.Elements()
+	for _, dcid := range uniqueDCIDList {
+		doidBytes := internal.UInt64ToBytesLittleEndian(dcid)
 		buf.Write(doidBytes[:])
 	}
 
@@ -79,7 +79,7 @@ func (x *XlatorDedup) writeManifest(ctx context.Context, namespace string, manif
 	}
 	defer file.Close()
 
-	offsetHeader := internal.UInt64ToBytesLittleEndian(dobjIdOffset)
+	offsetHeader := internal.UInt64ToBytesLittleEndian(dcidOffset)
 	if _, err := file.Write(offsetHeader[:]); err != nil {
 		return nil, fmt.Errorf("failed to write manifest offset header: %w", err)
 	}
@@ -103,7 +103,7 @@ func (x *XlatorDedup) writeManifest(ctx context.Context, namespace string, manif
 		logger.Tracef("Successfully uploaded manifest %s to S3 backend bucket %s.", manifestID, backendBucket)
 	}
 
-	return uniqueDoidList, nil
+	return uniqueDCIDList, nil
 }
 
 // readManifest reads and deserializes a manifest. It ensures the manifest is available locally, downloading from S3 if necessary.
@@ -122,9 +122,9 @@ func (x *XlatorDedup) readManifest(ctx context.Context, namespace, manifestID st
 		return nil, fmt.Errorf("manifest file %s is too small", path)
 	}
 
-	dobjIdOffset := internal.BytesToUInt64LittleEndian([8]byte(data[:8]))
-	chunkData := data[8 : 8+dobjIdOffset]
-	const chunkEntrySize = 32 + 8 + 8 // FP + Len + DOid
+	dcidOffset := internal.BytesToUInt64LittleEndian([8]byte(data[:8]))
+	chunkData := data[8 : 8+dcidOffset]
+	const chunkEntrySize = 32 + 8 + 8 // FP + Len + DCID
 	if len(chunkData)%chunkEntrySize != 0 {
 		return nil, fmt.Errorf("corrupted manifest chunk data section in %s", path)
 	}
@@ -136,7 +136,7 @@ func (x *XlatorDedup) readManifest(ctx context.Context, namespace, manifestID st
 		offset := i * chunkEntrySize
 		manifestList[i].FP = string(chunkData[offset : offset+32])
 		manifestList[i].Len = binary.LittleEndian.Uint64(chunkData[offset+32 : offset+40])
-		manifestList[i].DOid = binary.LittleEndian.Uint64(chunkData[offset+40 : offset+48])
+		manifestList[i].DCID = binary.LittleEndian.Uint64(chunkData[offset+40 : offset+48])
 	}
 
 	logger.Tracef("Successfully read manifest %s with %d chunks.", manifestID, len(manifestList))
@@ -178,8 +178,8 @@ func (x *XlatorDedup) deleteManifest(ctx context.Context, namespace, manifestID 
 
 // readUniqueDoids reads only the unique DOID set from a manifest.
 // This is more efficient than readManifest when only the DOID list is needed,
-// for example during garbage collection reference counting.
-func (x *XlatorDedup) readUniqueDoids(ctx context.Context, namespace, manifestID string) ([]uint64, error) {
+// for example, during garbage collection reference counting.
+func (x *XlatorDedup) readUniqueDCIDs(ctx context.Context, namespace, manifestID string) ([]uint64, error) {
 	path, err := x.ensureManifestLocal(ctx, namespace, manifestID)
 	if err != nil {
 		return nil, err
@@ -196,32 +196,32 @@ func (x *XlatorDedup) readUniqueDoids(ctx context.Context, namespace, manifestID
 	if _, err := io.ReadFull(file, offsetHeader[:]); err != nil {
 		return nil, fmt.Errorf("failed to read manifest offset header: %w", err)
 	}
-	dobjIdOffset := internal.BytesToUInt64LittleEndian(offsetHeader)
+	dcidOffset := internal.BytesToUInt64LittleEndian(offsetHeader)
 
 	// Seek directly to the start of the DOID set.
-	if _, err = file.Seek(int64(8+dobjIdOffset), io.SeekStart); err != nil {
+	if _, err = file.Seek(int64(8+dcidOffset), io.SeekStart); err != nil {
 		return nil, fmt.Errorf("failed to seek to DOID set in manifest file: %w", err)
 	}
 
 	// Read the rest of the file, which is the DOID set.
-	doidSetData, err := io.ReadAll(file)
+	dcidSetData, err := io.ReadAll(file)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read DOID set from manifest file: %w", err)
 	}
 
-	if len(doidSetData)%8 != 0 {
+	if len(dcidSetData)%8 != 0 {
 		return nil, fmt.Errorf("corrupted manifest DOID set section in %s", path)
 	}
 
-	numDoids := len(doidSetData) / 8
-	uniqueDoids := make([]uint64, numDoids)
-	for i := 0; i < numDoids; i++ {
+	numDCIDs := len(dcidSetData) / 8
+	uniqueDCIDs := make([]uint64, numDCIDs)
+	for i := 0; i < numDCIDs; i++ {
 		offset := i * 8
-		uniqueDoids[i] = binary.LittleEndian.Uint64(doidSetData[offset : offset+8])
+		uniqueDCIDs[i] = binary.LittleEndian.Uint64(dcidSetData[offset : offset+8])
 	}
 
-	logger.Tracef("Successfully read %d unique DOIDs from manifest %s.", len(uniqueDoids), manifestID)
-	return uniqueDoids, nil
+	logger.Tracef("Successfully read %d unique DCIDs from manifest %s.", len(uniqueDCIDs), manifestID)
+	return uniqueDCIDs, nil
 }
 
 // ensureManifestLocal checks if a manifest file exists locally, and if not,

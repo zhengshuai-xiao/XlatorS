@@ -43,3 +43,8 @@ func Daemonize(pidFile, logFile string, args []string) (*os.Process, error) {
 	}
 	return d, nil
 }
+
+// ReadPidFile reads a process id from a pid file.
+func ReadPidFile(path string) (int, error) {
+	return daemon.ReadPidFile(path)
+}

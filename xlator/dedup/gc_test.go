@@ -24,15 +24,18 @@ func TestCleanupNamespace(t *testing.T) {
 		return xlator, xlator.Mdsclient.(*MockMDS)
 	}
 
-	// --- Test Case: Successfully clean up a single DOID ---
-	t.Run("CleanupSingleDOID", func(t *testing.T) {
-		doid := uint64(100)
-		dobjName := "dobj-100"
-		dobjPath := filepath.Join(xlator.dobjCachePath, dobjName)
-
-		// Create a dummy DObj file to be deleted
-		f, err := os.Create(dobjPath)
+	// --- Test Case: Successfully clean up a single DCID ---
+	t.Run("CleanupSingleDCID", func(t *testing.T) {
+		dcid := uint64(100)
+		dcName := GetDCName(dcid)
+		parentDir := filepath.Join(xlator.dcCachePath, fmt.Sprintf("%d", dcid/1024))
+		err := os.MkdirAll(parentDir, 0755)
 		assert.NoError(t, err)
+		dcPath := filepath.Join(parentDir, dcName)
+
+		// Create a dummy DC file to be deleted
+		f, err := os.Create(dcPath)
+		assert.NoError(t, err, "Failed to create dummy dobj file")
 		f.Close()
 
 		// Mock the DObj content (for fpmap)
@@ -41,23 +44,22 @@ func TestCleanupNamespace(t *testing.T) {
 		fpMap[dummyFP] = BlockHeader{Offset: 8, Len: 10}
 
 		// Setup mock expectations
-		mockMDS.On("GetRandomDeletedDOIDs", namespace, int64(gcBatchSize)).Return([]uint64{doid}, nil).Once()
-		mockMDS.On("GetDObjNameInMDS", doid).Return(dobjName)
+		mockMDS.On("GetRandomDeletedDCIDs", namespace, int64(gcBatchSize)).Return([]uint64{dcid}, nil).Once()
 
-		mockMDS.On("RemoveFPs", namespace, []string{dummyFP}, doid).Return(nil).Once()
+		mockMDS.On("RemoveFPs", namespace, []string{dummyFP}, dcid).Return(nil).Once()
 
 		// Mock the final removal of the DOID from the deleted set
-		mockMDS.On("RemoveSpecificDeletedDOIDs", namespace, []uint64{doid}).Return(nil).Once()
+		mockMDS.On("RemoveSpecificDeletedDCIDs", namespace, []uint64{dcid}).Return(nil).Once()
 
 		// Mock the end of the GC run for this namespace
-		mockMDS.On("GetRandomDeletedDOIDs", namespace, int64(gcBatchSize)).Return([]uint64{}, nil).Once()
+		mockMDS.On("GetRandomDeletedDCIDs", namespace, int64(gcBatchSize)).Return([]uint64{}, nil).Once()
 
 		// Create a mock getDataObject function for this test case.
 		mockGetDataObject := func(bucket, object string, o minio.ObjectOptions) (DCReader, error) {
 			// Return a mocked DCReader
-			file, _ := os.Open(dobjPath) // Re-open for the test
+			file, _ := os.Open(dcPath) // Re-open for the test
 			return DCReader{
-				path:   dobjPath,
+				path:   dcPath,
 				fpmap:  fpMap,
 				filer:  file, // The filer needs to be closable
 				bucket: bucket,
@@ -71,28 +73,26 @@ func TestCleanupNamespace(t *testing.T) {
 		mockMDS.AssertExpectations(t)
 
 		// Verify the local file was deleted
-		_, err = os.Stat(dobjPath)
+		_, err = os.Stat(dcPath)
 		assert.True(t, os.IsNotExist(err), "The DObj file should have been deleted from the local cache")
 	})
 
-	// --- Test Case: DObj file not found ---
-	t.Run("CleanupDObjNotFound", func(t *testing.T) {
+	// --- Test Case: DC file not found ---
+	t.Run("CleanupDCNotFound", func(t *testing.T) {
 		xlator, mockMDS := newTestXlator()
 
-		doid := uint64(200)
-		dobjName := "dobj-200"
+		dcid := uint64(200)
 
-		mockMDS.On("GetRandomDeletedDOIDs", namespace, int64(gcBatchSize)).Return([]uint64{doid}, nil).Once()
-		mockMDS.On("GetDObjNameInMDS", doid).Return(dobjName)
+		mockMDS.On("GetRandomDeletedDCIDs", namespace, int64(gcBatchSize)).Return([]uint64{dcid}, nil).Once()
 
 		// This time, getDataObject returns a "not found" error
 		mockGetDataObject := func(bucket, object string, o minio.ObjectOptions) (DCReader, error) {
 			return DCReader{}, os.ErrNotExist
 		}
 
-		// We expect the DOID to be cleaned up from the GC set anyway
-		mockMDS.On("RemoveSpecificDeletedDOIDs", namespace, []uint64{doid}).Return(nil).Once()
-		mockMDS.On("GetRandomDeletedDOIDs", namespace, int64(gcBatchSize)).Return([]uint64{}, nil).Once()
+		// We expect the DCID to be cleaned up from the GC set anyway
+		mockMDS.On("RemoveSpecificDeletedDCIDs", namespace, []uint64{dcid}).Return(nil).Once()
+		mockMDS.On("GetRandomDeletedDCIDs", namespace, int64(gcBatchSize)).Return([]uint64{}, nil).Once()
 
 		xlator.cleanupNamespace(ctx, namespace, mockGetDataObject)
 		mockMDS.AssertExpectations(t)
@@ -102,28 +102,30 @@ func TestCleanupNamespace(t *testing.T) {
 	t.Run("CleanupRemoveFPsFails", func(t *testing.T) {
 		xlator, mockMDS := newTestXlator()
 
-		doid := uint64(300)
-		dobjName := "dobj-300"
-		dobjPath := filepath.Join(xlator.dobjCachePath, dobjName)
-		f, err := os.Create(dobjPath)
+		dcid := uint64(300)
+		dcName := GetDCName(dcid)
+		parentDir := filepath.Join(xlator.dcCachePath, fmt.Sprintf("%d", dcid/1024))
+		err := os.MkdirAll(parentDir, 0755)
 		assert.NoError(t, err)
+		dcPath := filepath.Join(parentDir, dcName)
+		f, err := os.Create(dcPath)
+		assert.NoError(t, err, "Failed to create dummy dobj file")
 		f.Close()
 
 		dummyFP := "dummy-fp-for-fail-case"
 		fpMap := map[string]BlockHeader{dummyFP: {}}
 
-		mockMDS.On("GetRandomDeletedDOIDs", namespace, int64(gcBatchSize)).Return([]uint64{doid}, nil).Once()
-		mockMDS.On("GetDObjNameInMDS", doid).Return(dobjName)
+		mockMDS.On("GetRandomDeletedDCIDs", namespace, int64(gcBatchSize)).Return([]uint64{dcid}, nil).Once()
 
 		// Mock RemoveFPs to fail
-		mockMDS.On("RemoveFPs", namespace, []string{dummyFP}, doid).Return(fmt.Errorf("redis is down")).Once()
+		mockMDS.On("RemoveFPs", namespace, []string{dummyFP}, dcid).Return(fmt.Errorf("redis is down")).Once()
 
-		mockMDS.On("GetRandomDeletedDOIDs", namespace, int64(gcBatchSize)).Return([]uint64{}, nil).Once()
+		mockMDS.On("GetRandomDeletedDCIDs", namespace, int64(gcBatchSize)).Return([]uint64{}, nil).Once()
 
 		mockGetDataObject := func(bucket, object string, o minio.ObjectOptions) (DCReader, error) {
-			file, _ := os.Open(dobjPath)
+			file, _ := os.Open(dcPath)
 			return DCReader{
-				path:  dobjPath,
+				path:  dcPath,
 				fpmap: fpMap,
 				filer: file,
 			}, nil
@@ -133,7 +135,7 @@ func TestCleanupNamespace(t *testing.T) {
 		mockMDS.AssertExpectations(t)
 
 		// Verify the local file was NOT deleted
-		_, err = os.Stat(dobjPath)
+		_, err = os.Stat(dcPath)
 		assert.NoError(t, err, "The DObj file should NOT have been deleted")
 	})
 }

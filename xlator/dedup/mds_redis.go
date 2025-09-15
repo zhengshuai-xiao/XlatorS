@@ -62,11 +62,10 @@ Redis features:
 */
 const (
 	KeyExists      = 1
-	DOKeyWord      = "DataObj"
 	FPCacheKey     = "FPCache"
 	BucketsKey     = "Buckets"
 	RefKeySuffix   = "Ref"
-	DeletedDOIDKey = "deletedDOID"
+	DeletedDCIDKey = "deletedDCID"
 )
 
 const addRefScript = `
@@ -516,36 +515,14 @@ func (m *MDSRedis) BucketExist(bucket string) (bool, error) {
 	return exists, nil
 }
 
-func (m *MDSRedis) GetIncreasedDOID() (int64, error) {
+func (m *MDSRedis) GetIncreasedDCID() (int64, error) {
 	ctx := context.Background()
 
-	id, err := m.Rdb.Incr(ctx, doidkey).Result()
+	id, err := m.Rdb.Incr(ctx, dcidkey).Result()
 	if err != nil {
 		return 0, err
 	}
 	return id, nil
-}
-func (m *MDSRedis) GetDObjNameInMDS(id uint64) string {
-
-	return fmt.Sprintf("%s%d", DOKeyWord, id)
-}
-
-func (m *MDSRedis) GetDOIDFromDObjName(objName string) (num int64, err error) {
-
-	if len(objName) <= len(DOKeyWord) || objName[:len(DOKeyWord)] != DOKeyWord {
-		return 0, fmt.Errorf("ObjName[%s] is not starting with %s", objName, DOKeyWord)
-	}
-
-	numStr := objName[len(DOKeyWord):]
-	if numStr == "" {
-		return 0, fmt.Errorf("there is no num")
-	}
-
-	num, err = strconv.ParseInt(numStr, 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf("the num[%s] is not valid: %w", numStr, err)
-	}
-	return
 }
 
 func (m *MDSRedis) GetIncreasedManifestID() (string, error) {
@@ -581,16 +558,16 @@ func (m *MDSRedis) WriteManifest(manifestid string, manifestList []ChunkInManife
 	return err
 }
 
-func (m *MDSRedis) writeManifestReturnDOidList(manifestid string, manifestList []ChunkInManifest) (doidSet *internal.UInt64Set, err error) {
+func (m *MDSRedis) writeManifestReturnDCIDList(manifestid string, manifestList []ChunkInManifest) (dcidSet *internal.UInt64Set, err error) {
 	ctx := context.Background()
-	doidSet = internal.NewUInt64Set()
+	dcidSet = internal.NewUInt64Set()
 	if len(manifestList) == 0 {
-		return doidSet, nil
+		return dcidSet, nil
 	}
 
 	serializedChunks := make([]interface{}, len(manifestList))
 	for i, chunk := range manifestList {
-		doidSet.Add(chunk.DOid)
+		dcidSet.Add(chunk.DCID)
 		str, err := internal.SerializeToString(chunk)
 		if err != nil {
 			logger.Errorf("MDSRedis::failed to SerializeToString chunk[%v] : %s", chunk, err)
@@ -603,7 +580,7 @@ func (m *MDSRedis) writeManifestReturnDOidList(manifestid string, manifestList [
 		logger.Errorf("MDSRedis::failed to RPush chunks into manifest[%s] : %s", manifestid, err)
 		return nil, err
 	}
-	return doidSet, nil
+	return dcidSet, nil
 }
 
 func (m *MDSRedis) delManifest(ctx context.Context, mfid string) (err error) {
@@ -665,9 +642,9 @@ func (m *MDSRedis) GetManifest(manifestid string) (chunks []ChunkInManifest, err
 	return chunks, nil
 }
 
-func (m *MDSRedis) getManifestAndDOIDSet(manifestid string) (chunks []ChunkInManifest, doidSet *internal.UInt64Set, err error) {
+func (m *MDSRedis) getManifestAndDCIDSet(manifestid string) (chunks []ChunkInManifest, dcidSet *internal.UInt64Set, err error) {
 	ctx := context.Background()
-	doidSet = internal.NewUInt64Set()
+	dcidSet = internal.NewUInt64Set()
 	// Get the list of chunk IDs from the manifest
 	fps, err := m.Rdb.LRange(ctx, manifestid, 0, -1).Result()
 	if err != nil {
@@ -684,9 +661,9 @@ func (m *MDSRedis) getManifestAndDOIDSet(manifestid string) (chunks []ChunkInMan
 			return nil, nil, err
 		}
 		chunks = append(chunks, chunk)
-		doidSet.Add(chunk.DOid)
+		dcidSet.Add(chunk.DCID)
 	}
-	return chunks, doidSet, nil
+	return chunks, dcidSet, nil
 }
 
 func (m *MDSRedis) DedupFPs(namespace string, chunks []Chunk) error {
@@ -696,7 +673,7 @@ func (m *MDSRedis) DedupFPs(namespace string, chunks []Chunk) error {
 
 		fps := m.getFingerprint(namespace, chunk.FP)
 		if fps != nil {
-			chunks[i].DOid = fps.DOid
+			chunks[i].DCID = fps.DCID
 			chunks[i].Deduped = true
 			//chunks[i].LenInDOid = fps.LenInDOid
 			//chunks[i].OffInDOid = fps.OffInDOid
@@ -711,11 +688,11 @@ func (m *MDSRedis) InsertFPs(namespace string, chunks []ChunkInManifest) error {
 
 	for _, chunk := range chunks {
 		//pipe.Set(ctx, getFPNameInMDS(chunk.FP), str, 0)
-		err := m.setFingerprint(namespace, chunk.FP, FPValInMDS{DOid: chunk.DOid})
+		err := m.setFingerprint(namespace, chunk.FP, FPValInMDS{DCID: chunk.DCID})
 		if err != nil {
 			return err
 		}
-		logger.Tracef("InsertFPs: fp[%s], DOid:%d", internal.StringToHex(chunk.FP), chunk.DOid)
+		logger.Tracef("InsertFPs: fp[%s], DCID:%d", internal.StringToHex(chunk.FP), chunk.DCID)
 	}
 	//_, err := pipe.Exec(ctx)
 	return nil
@@ -724,7 +701,7 @@ func (m *MDSRedis) InsertFPs(namespace string, chunks []ChunkInManifest) error {
 func (m *MDSRedis) DedupFPsBatch(namespace string, chunks []Chunk) error {
 	ctx := context.Background()
 	fpCache := GetFingerprintCache(namespace)
-	deleteDOIDKey := GetDeletedDOIDKey(namespace)
+	deleteDCIDKey := GetDeletedDCIDKey(namespace)
 	// Use a WATCH transaction to ensure we get a consistent view of the fingerprints.
 	// If the fingerprint cache is modified concurrently (e.g., by RemoveFPs),
 	// the transaction will fail and retry, preventing decisions based on stale data.
@@ -760,25 +737,25 @@ func (m *MDSRedis) DedupFPsBatch(namespace string, chunks []Chunk) error {
 				continue
 			}
 
-			DOid, err := strconv.ParseUint(doidStr, 10, 64)
+			DCID, err := strconv.ParseUint(doidStr, 10, 64)
 			if err != nil {
-				return fmt.Errorf("failed to parse DOID '%s' for fp %s: %w", doidStr, internal.StringToHex(chunks[i].FP), err)
+				return fmt.Errorf("failed to parse DCID '%s' for fp %s: %w", doidStr, internal.StringToHex(chunks[i].FP), err)
 			}
-			exist, err := m.IsDOIDDeleted(namespace, DOid)
+			exist, err := m.IsDCIDDeleted(namespace, DCID)
 			if err != nil {
 				return err
 			}
 			if exist {
-				logger.Tracef("the fp[%s]'s Data object[id:%d] is in deleted list, so skip it", internal.StringToHex(chunks[i].FP), DOid)
+				logger.Tracef("the fp[%s]'s Data container[id:%d] is in deleted list, so skip it", internal.StringToHex(chunks[i].FP), DCID)
 				chunks[i].Deduped = false
 				continue
 			}
-			chunks[i].DOid = DOid
+			chunks[i].DCID = DCID
 			chunks[i].Deduped = true
-			logger.Tracef("DedupFPsBatch: found existing fp:%s in %s, DOid: %d", internal.StringToHex(chunks[i].FP), fpCache, DOid)
+			logger.Tracef("DedupFPsBatch: found existing fp:%s in %s, DCID: %d", internal.StringToHex(chunks[i].FP), fpCache, DCID)
 		}
 		return nil
-	}, fpCache, deleteDOIDKey)
+	}, fpCache, deleteDCIDKey)
 
 	if err != nil {
 		logger.Errorf("DedupFPsBatch: transaction failed for namespace %s: %v", namespace, err)
@@ -802,8 +779,8 @@ func (m *MDSRedis) InsertFPsBatch(namespace string, chunks []ChunkInManifest) er
 			// Using HSet will overwrite any existing value,
 			// which can lead to race conditions and data inconsistency.
 			//But here we should use HSet
-			pipe.HSet(ctx, fpCache, chunk.FP, strconv.FormatUint(chunk.DOid, 10))
-			logger.Tracef("InsertFPsBatch: fp[%s], DOid:%d", internal.StringToHex(chunk.FP), chunk.DOid)
+			pipe.HSet(ctx, fpCache, chunk.FP, strconv.FormatUint(chunk.DCID, 10))
+			logger.Tracef("InsertFPsBatch: fp[%s], DCID:%d", internal.StringToHex(chunk.FP), chunk.DCID)
 		}
 		_, err := pipe.Exec(ctx)
 		return err
@@ -820,10 +797,10 @@ func (m *MDSRedis) InsertFPsBatch(namespace string, chunks []ChunkInManifest) er
 // This is crucial to prevent deleting a fingerprint that has been reused by a newer Data Object.
 // This operation is atomic, using a Redis WATCH transaction to effectively lock the fingerprint
 // cache for the given namespace during the operation.
-func (m *MDSRedis) RemoveFPs(namespace string, FPs []string, DOid uint64) error {
+func (m *MDSRedis) RemoveFPs(namespace string, FPs []string, DCID uint64) error {
 	ctx := context.Background()
 	fpCacheKey := GetFingerprintCache(namespace)
-	doidStr := strconv.FormatUint(DOid, 10)
+	dcidStr := strconv.FormatUint(DCID, 10)
 
 	err := m.Rdb.Watch(ctx, func(tx *redis.Tx) error {
 		if len(FPs) == 0 {
@@ -852,12 +829,12 @@ func (m *MDSRedis) RemoveFPs(namespace string, FPs []string, DOid uint64) error 
 			}
 
 			// Only add the FP to the deletion list if the stored DOid matches the expected one.
-			if storedDoidStr == doidStr {
+			if storedDoidStr == dcidStr {
 				fpsToDelete = append(fpsToDelete, fp)
 			} else {
 				// This is a valid scenario where the fingerprint has been overwritten by a new
 				// data object. We must not delete it.
-				logger.Warnf("RemoveFPs: fingerprint %s in cache %s has a different DOID (%s) than expected (%s). Not deleting.", internal.StringToHex(fp), fpCacheKey, storedDoidStr, doidStr)
+				logger.Warnf("RemoveFPs: fingerprint %s in cache %s has a different DCID (%s) than expected (%s). Not deleting.", internal.StringToHex(fp), fpCacheKey, storedDoidStr, dcidStr)
 			}
 		}
 
@@ -883,7 +860,7 @@ func (m *MDSRedis) RemoveFPs(namespace string, FPs []string, DOid uint64) error 
 func (m *MDSRedis) getFingerprint(namespace string, fp string) *FPValInMDS {
 	ctx := context.Background()
 	fpCache := GetFingerprintCache(namespace)
-	doidStr, err := m.Rdb.HGet(ctx, fpCache, fp).Result()
+	dcidStr, err := m.Rdb.HGet(ctx, fpCache, fp).Result()
 	if err != nil {
 		if err == redis.Nil {
 			//not existed
@@ -893,7 +870,7 @@ func (m *MDSRedis) getFingerprint(namespace string, fp string) *FPValInMDS {
 		return nil
 	}
 	fps := &FPValInMDS{}
-	fps.DOid, err = strconv.ParseUint(doidStr, 10, 64)
+	fps.DCID, err = strconv.ParseUint(dcidStr, 10, 64)
 	if err != nil {
 		logger.Errorf("getFingerprint: failed to ParseUint. err:%s", err)
 		return nil
@@ -915,16 +892,16 @@ func (m *MDSRedis) setFingerprint(namespace string, fp string, dpval FPValInMDS)
 
 // AddReference adds an object reference to multiple Data Objects in a batch.
 // It uses a Redis Lua script to ensure atomicity and avoid WATCH-based transaction failures.
-func (m *MDSRedis) AddReference(namespace string, dataObjectIDs []uint64, objectName string) error {
+func (m *MDSRedis) AddReference(namespace string, dataContainerIDs []uint64, objectName string) error {
 	ctx := context.Background()
-	if len(dataObjectIDs) == 0 {
+	if len(dataContainerIDs) == 0 {
 		return nil
 	}
 	refKey := GetRefKey(namespace)
 
-	args := make([]interface{}, 0, len(dataObjectIDs)+1)
+	args := make([]interface{}, 0, len(dataContainerIDs)+1)
 	args = append(args, objectName)
-	for _, id := range dataObjectIDs {
+	for _, id := range dataContainerIDs {
 		args = append(args, strconv.FormatUint(id, 10))
 	}
 
@@ -938,17 +915,17 @@ func (m *MDSRedis) AddReference(namespace string, dataObjectIDs []uint64, object
 
 // RemoveReference removes an object reference from multiple Data Objects in a batch.
 // It uses a Redis Lua script to ensure atomicity and avoid WATCH-based transaction failures.
-// The script returns a list of DOIDs that have become dereferenced.
-func (m *MDSRedis) RemoveReference(namespace string, dataObjectIDs []uint64, objectName string) (dereferencedDObjIDs []uint64, err error) {
+// The script returns a list of DCIDs that have become dereferenced.
+func (m *MDSRedis) RemoveReference(namespace string, dataContainerIDs []uint64, objectName string) (dereferencedDCIDs []uint64, err error) {
 	ctx := context.Background()
-	if len(dataObjectIDs) == 0 {
+	if len(dataContainerIDs) == 0 {
 		return nil, nil
 	}
 	refKey := GetRefKey(namespace)
 
-	args := make([]interface{}, 0, len(dataObjectIDs)+1)
+	args := make([]interface{}, 0, len(dataContainerIDs)+1)
 	args = append(args, objectName)
-	for _, id := range dataObjectIDs {
+	for _, id := range dataContainerIDs {
 		args = append(args, strconv.FormatUint(id, 10))
 	}
 
@@ -960,38 +937,38 @@ func (m *MDSRedis) RemoveReference(namespace string, dataObjectIDs []uint64, obj
 		return nil, err
 	}
 
-	// The Lua script returns a table (slice in Go) of dereferenced DOID strings.
+	// The Lua script returns a table (slice in Go) of dereferenced DCID strings.
 	if dereferencedIDs, ok := result.([]interface{}); ok {
-		dereferencedDObjIDs = make([]uint64, 0, len(dereferencedIDs))
+		dereferencedDCIDs = make([]uint64, 0, len(dereferencedIDs))
 		for _, idVal := range dereferencedIDs {
 			if idStr, ok := idVal.(string); ok {
 				id, err := strconv.ParseUint(idStr, 10, 64)
 				if err != nil {
-					logger.Warnf("RemoveReference: could not parse dereferenced DOID '%s' from script result: %v", idStr, err)
+					logger.Warnf("RemoveReference: could not parse dereferenced DCID '%s' from script result: %v", idStr, err)
 					continue
 				}
-				dereferencedDObjIDs = append(dereferencedDObjIDs, id)
+				dereferencedDCIDs = append(dereferencedDCIDs, id)
 			}
 		}
 	}
 
-	return dereferencedDObjIDs, nil
+	return dereferencedDCIDs, nil
 }
 
-// AddDeletedDOIDs adds a list of Data Object IDs to the set of deleted DOIDs for a given namespace.
+// AddDeletedDCIDs adds a list of Data Container IDs to the set of deleted DCIDs for a given namespace.
 // This set is used by a background garbage collection process.
-func (m *MDSRedis) AddDeletedDOIDs(namespace string, doids []uint64) error {
-	if len(doids) == 0 {
+func (m *MDSRedis) AddDeletedDCIDs(namespace string, dcids []uint64) error {
+	if len(dcids) == 0 {
 		return nil
 	}
 
 	ctx := context.Background()
-	key := GetDeletedDOIDKey(namespace)
+	key := GetDeletedDCIDKey(namespace)
 
 	// Convert []uint64 to []interface{} for SAdd
-	members := make([]interface{}, len(doids))
-	for i, doid := range doids {
-		members[i] = doid
+	members := make([]interface{}, len(dcids))
+	for i, dcid := range dcids {
+		members[i] = dcid
 	}
 
 	// SAdd is atomic, so a transaction is not needed. Using WATCH here can cause
@@ -999,10 +976,10 @@ func (m *MDSRedis) AddDeletedDOIDs(namespace string, doids []uint64) error {
 	// leading to unnecessary transaction failures.
 	err := m.Rdb.SAdd(ctx, key, members...).Err()
 	if err != nil {
-		logger.Errorf("AddDeletedDOIDs: failed to add DOIDs to set %s: %v", key, err)
+		logger.Errorf("AddDeletedDCIDs: failed to add DCIDs to set %s: %v", key, err)
 		return err
 	}
-	logger.Tracef("AddDeletedDOIDs: added %d DOIDs to set %s", len(doids), key)
+	logger.Tracef("AddDeletedDCIDs: added %d DCIDs to set %s", len(dcids), key)
 
 	return nil
 }
@@ -1037,77 +1014,77 @@ func (m *MDSRedis) GetAllNamespaces() ([]string, error) {
 	return namespaces, nil
 }
 
-// IsDOIDDeleted checks if a specific DOID is present in the deleted DOID set for a given namespace.
-// It returns true if the DOID is marked for deletion, false otherwise.
-func (m *MDSRedis) IsDOIDDeleted(namespace string, doid uint64) (bool, error) {
+// IsDCIDDeleted checks if a specific DCID is present in the deleted DCID set for a given namespace.
+// It returns true if the DCID is marked for deletion, false otherwise.
+func (m *MDSRedis) IsDCIDDeleted(namespace string, dcid uint64) (bool, error) {
 	ctx := context.Background()
-	key := GetDeletedDOIDKey(namespace)
-	doidStr := strconv.FormatUint(doid, 10)
+	key := GetDeletedDCIDKey(namespace)
+	dcidStr := strconv.FormatUint(dcid, 10)
 
-	isMember, err := m.Rdb.SIsMember(ctx, key, doidStr).Result()
+	isMember, err := m.Rdb.SIsMember(ctx, key, dcidStr).Result()
 	if err != nil {
-		logger.Errorf("IsDOIDDeleted: failed to check SISMEMBER for DOID %d in set %s: %v", doid, key, err)
+		logger.Errorf("IsDCIDDeleted: failed to check SISMEMBER for DCID %d in set %s: %v", dcid, key, err)
 		return false, err
 	}
 
 	return isMember, nil
 }
 
-// GetRandomDeletedDOIDs retrieves a specified number of random DOIDs from the deleted set without removing them.
-func (m *MDSRedis) GetRandomDeletedDOIDs(namespace string, count int64) ([]uint64, error) {
+// GetRandomDeletedDCIDs retrieves a specified number of random DCIDs from the deleted set without removing them.
+func (m *MDSRedis) GetRandomDeletedDCIDs(namespace string, count int64) ([]uint64, error) {
 	if count <= 0 {
 		return nil, nil
 	}
 	ctx := context.Background()
-	key := GetDeletedDOIDKey(namespace)
+	key := GetDeletedDCIDKey(namespace)
 
-	doidStrs, err := m.Rdb.SRandMemberN(ctx, key, count).Result()
+	dcidStrs, err := m.Rdb.SRandMemberN(ctx, key, count).Result()
 	if err != nil {
 		if err == redis.Nil {
 			return nil, nil // Set is empty
 		}
-		logger.Errorf("GetRandomDeletedDOIDs: failed to SRANDMEMBER from %s: %v", key, err)
+		logger.Errorf("GetRandomDeletedDCIDs: failed to SRANDMEMBER from %s: %v", key, err)
 		return nil, err
 	}
 
-	if len(doidStrs) == 0 {
+	if len(dcidStrs) == 0 {
 		return nil, nil
 	}
 
-	doids := make([]uint64, 0, len(doidStrs))
-	for _, s := range doidStrs {
-		doid, err := strconv.ParseUint(s, 10, 64)
+	dcids := make([]uint64, 0, len(dcidStrs))
+	for _, s := range dcidStrs {
+		dcid, err := strconv.ParseUint(s, 10, 64)
 		if err != nil {
-			logger.Warnf("GetRandomDeletedDOIDs: failed to parse DOID string '%s', skipping: %v", s, err)
+			logger.Warnf("GetRandomDeletedDCIDs: failed to parse DCID string '%s', skipping: %v", s, err)
 			continue
 		}
-		doids = append(doids, doid)
+		dcids = append(dcids, dcid)
 	}
 
-	return doids, nil
+	return dcids, nil
 }
 
-// RemoveSpecificDeletedDOIDs removes a list of specific DOIDs from the deleted set.
-func (m *MDSRedis) RemoveSpecificDeletedDOIDs(namespace string, doids []uint64) error {
-	if len(doids) == 0 {
+// RemoveSpecificDeletedDCIDs removes a list of specific DCIDs from the deleted set.
+func (m *MDSRedis) RemoveSpecificDeletedDCIDs(namespace string, dcids []uint64) error {
+	if len(dcids) == 0 {
 		return nil
 	}
 
 	ctx := context.Background()
-	key := GetDeletedDOIDKey(namespace)
+	key := GetDeletedDCIDKey(namespace)
 
 	// Convert []uint64 to []interface{} for SRem
-	members := make([]interface{}, len(doids))
-	for i, doid := range doids {
-		members[i] = doid
+	members := make([]interface{}, len(dcids))
+	for i, dcid := range dcids {
+		members[i] = dcid
 	}
 
 	err := m.Rdb.SRem(ctx, key, members...).Err()
 	if err != nil {
-		logger.Errorf("RemoveSpecificDeletedDOIDs: failed to remove DOIDs from set %s: %v", key, err)
+		logger.Errorf("RemoveSpecificDeletedDCIDs: failed to remove DCIDs from set %s: %v", key, err)
 		return err
 	}
-	logger.Tracef("RemoveSpecificDeletedDOIDs: removed %d DOIDs from set %s", len(doids), key)
+	logger.Tracef("RemoveSpecificDeletedDCIDs: removed %d DCIDs from set %s", len(dcids), key)
 
 	return nil
 }

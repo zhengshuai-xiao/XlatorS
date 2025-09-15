@@ -52,7 +52,7 @@ type XlatorDedup struct {
 	HTTPClient           *http.Client
 	Metrics              *minio.BackendMetrics
 	Mdsclient            MDS
-	dobjCachePath        string                       // The local directory used to cache data objects.
+	dcCachePath          string                       // The local directory used to cache data containers.
 	stopGC               chan struct{}                // Channel to signal GC stop
 	wg                   sync.WaitGroup               // WaitGroup for graceful shutdown
 	multiPartFPCaches    map[string]map[string]uint64 // In-memory FP cache for active multipart uploads. Key: uploadID
@@ -61,6 +61,7 @@ type XlatorDedup struct {
 	fastCDCAvgSize       int
 	fastCDCMaxSize       int
 	dsBackendType        DObjBackendType // datastore bankend type: "posix" or "s3"
+	dcBackend            DataContainerBackend
 	Compression          string
 }
 
@@ -92,7 +93,7 @@ func NewXlatorDedup(gConf *internal.Config) (*XlatorDedup, error) {
 		},
 		Metrics:           metrics,
 		Mdsclient:         redismeta,
-		dobjCachePath:     gConf.DownloadCache,
+		dcCachePath:       gConf.DownloadCache,
 		stopGC:            make(chan struct{}),
 		multiPartFPCaches: make(map[string]map[string]uint64),
 	}
@@ -107,6 +108,18 @@ func NewXlatorDedup(gConf *internal.Config) (*XlatorDedup, error) {
 	}
 	logger.Infof("Using DObj backend type: %s", xlatorDedup.dsBackendType)
 
+	// Initialize the data container backend based on the type.
+	if xlatorDedup.dsBackendType == DObjBackendS3 {
+		xlatorDedup.dcBackend = &S3Backend{
+			dcCachePath: xlatorDedup.dcCachePath,
+		}
+	} else {
+		xlatorDedup.dcBackend = &POSIXBackend{
+			dcCachePath: xlatorDedup.dcCachePath,
+		}
+	}
+
+	// Initialize S3 client only if the backend is S3.
 	if xlatorDedup.dsBackendType == DObjBackendS3 {
 		s3 := &S3client.S3{Host: gConf.BackendAddr}
 		logger.Info("NewS3Gateway Endpoint:", s3.Host)
@@ -117,6 +130,9 @@ func NewXlatorDedup(gConf *internal.Config) (*XlatorDedup, error) {
 			return nil, err
 		}
 		xlatorDedup.Client = client
+		if s3Backend, ok := xlatorDedup.dcBackend.(*S3Backend); ok {
+			s3Backend.client = client
+		}
 	}
 
 	// Configure FastCDC parameters from environment variables, with sane defaults.
@@ -140,18 +156,18 @@ func NewXlatorDedup(gConf *internal.Config) (*XlatorDedup, error) {
 	xlatorDedup.fastCDCMaxSize = parseEnvInt("XL_DEDUP_FASTCDC_MAX_SIZE", 256*1024) // 256KiB
 
 	// Validate the cache path. An empty path would cause silent failure.
-	if xlatorDedup.dobjCachePath == "" {
+	if xlatorDedup.dcCachePath == "" {
 		err := fmt.Errorf("data object cache path (downloadCache) cannot be empty")
 		logger.Errorf("%v", err)
 		return nil, err
 	}
 
 	// Ensure the local cache directory for data objects exists.
-	if err := os.MkdirAll(xlatorDedup.dobjCachePath, 0750); err != nil {
-		logger.Errorf("failed to create data object cache directory %s: %v", xlatorDedup.dobjCachePath, err)
+	if err := os.MkdirAll(xlatorDedup.dcCachePath, 0750); err != nil {
+		logger.Errorf("failed to create data container cache directory %s: %v", xlatorDedup.dcCachePath, err)
 		return nil, err
 	}
-	logger.Infof("Data object cache directory '%s' is ready.", xlatorDedup.dobjCachePath)
+	logger.Infof("Data container cache directory '%s' is ready.", xlatorDedup.dcCachePath)
 
 	//set compression
 	xlatorDedup.Compression = strings.ToLower(gConf.Compression)
@@ -460,16 +476,16 @@ func (x *XlatorDedup) PutObject(ctx context.Context, bucket string, object strin
 	}
 	elapsed1 := time.Since(start1)
 	start2 := time.Now()
-	logger.Infof("PutObject 3, manifestList=%d, elapsed1=%f", len(manifestList), elapsed1.Seconds())
+	logger.Infof("PutObject: manifestList=%d, elapsed1=%f", len(manifestList), elapsed1.Seconds())
 	// Write manifest to a file and conditionally upload to S3
-	uniqueDoids, err := x.writeManifest(ctx, ns, manifestID, manifestList)
+	uniqueDCIDs, err := x.writeManifest(ctx, ns, manifestID, manifestList)
 	if err != nil {
 		logger.Errorf("failed to write manifest file for object %s: %v", object, err)
 		return objInfo, err
 	}
 
 	//commit meta data
-	err = x.Mdsclient.PutObjectMeta(objInfo, uniqueDoids)
+	err = x.Mdsclient.PutObjectMeta(objInfo, uniqueDCIDs)
 	if err != nil {
 		//TODO: cleanup manifest?
 		logger.Errorf("failed to commit metadata for object %s: %v", object, err)
@@ -731,14 +747,14 @@ func (x *XlatorDedup) CompleteMultipartUpload(ctx context.Context, bucket string
 	}
 
 	manifestID := objInfo.UserDefined[ManifestIDKey]
-	uniqueDoids, err := x.writeManifest(ctx, ns, manifestID, finalManifest)
+	uniqueDCIDs, err := x.writeManifest(ctx, ns, manifestID, finalManifest)
 	if err != nil {
 		logger.Errorf("CompleteMultipartUpload: failed to write final manifest file for %s/%s: %v", bucket, object, err)
 		return oi, err
 	}
 
 	// Commit the final object metadata (without the manifest list).
-	if err = x.Mdsclient.PutObjectMeta(objInfo, uniqueDoids); err != nil {
+	if err = x.Mdsclient.PutObjectMeta(objInfo, uniqueDCIDs); err != nil {
 		logger.Errorf("CompleteMultipartUpload: failed to commit final metadata for %s/%s: %v", bucket, object, err)
 		return oi, err
 	}
@@ -855,23 +871,23 @@ func (x *XlatorDedup) DeleteObject(ctx context.Context, bucket string, object st
 		logger.Warnf("DeleteObject: manifest ID is empty for %s/%s. Deleting metadata only.", bucket, object)
 	}
 
-	var dereferencedDObjIDs []uint64
+	var dereferencedDCIDs []uint64
 	if manifestID != "" {
 		ns, _, err := ParseNamespaceAndBucket(bucket)
 		if err != nil {
 			return minio.ObjectInfo{}, fmt.Errorf("DeleteObject: failed to parse namespace for bucket %s: %w", bucket, err)
 		}
 
-		// Step 1: Get the list of DOIDs this object references.
-		dobjIDs, err := x.readUniqueDoids(ctx, ns, manifestID)
+		// Step 1: Get the list of DCIDs this object references.
+		dcIDs, err := x.readUniqueDCIDs(ctx, ns, manifestID)
 		if err != nil && !os.IsNotExist(err) {
 			// Log the error but proceed with deletion of metadata. The manifest file will become an orphan.
-			logger.Errorf("DeleteObject: failed to read unique DOIDs from manifest %s: %v", manifestID, err)
+			logger.Errorf("DeleteObject: failed to read unique DCIDs from manifest %s: %v", manifestID, err)
 		}
 
-		// Step 2: Decrement references and get the list of DOIDs that are now free.
-		if len(dobjIDs) > 0 {
-			dereferencedDObjIDs, err = x.Mdsclient.RemoveReference(ns, dobjIDs, object)
+		// Step 2: Decrement references and get the list of DCIDs that are now free.
+		if len(dcIDs) > 0 {
+			dereferencedDCIDs, err = x.Mdsclient.RemoveReference(ns, dcIDs, object)
 			if err != nil {
 				// This is a more critical error, as it can lead to data leaks.
 				logger.Errorf("DeleteObject: failed to remove references for object %s: %v", object, err)
@@ -894,16 +910,16 @@ func (x *XlatorDedup) DeleteObject(ctx context.Context, bucket string, object st
 	}
 
 	// Step 5: If any DOIDs became dereferenced, add them to the GC queue
-	if len(dereferencedDObjIDs) > 0 {
+	if len(dereferencedDCIDs) > 0 {
 		ns, _, err := ParseNamespaceAndBucket(bucket)
 		if err != nil {
 			logger.Errorf("DeleteObject: failed to parse namespace for bucket %s: %v", bucket, err)
 		} else {
-			err = x.Mdsclient.AddDeletedDOIDs(ns, dereferencedDObjIDs)
+			err = x.Mdsclient.AddDeletedDCIDs(ns, dereferencedDCIDs)
 			if err != nil {
-				logger.Errorf("DeleteObject: failed to add DOIDs %v to GC queue for namespace %s: %v", dereferencedDObjIDs, ns, err)
+				logger.Errorf("DeleteObject: failed to add DCIDs %v to GC queue for namespace %s: %v", dereferencedDCIDs, ns, err)
 			} else {
-				logger.Infof("DeleteObject: added %d DOIDs to GC queue for namespace %s.", len(dereferencedDObjIDs), ns)
+				logger.Infof("DeleteObject: added %d DCIDs to GC queue for namespace %s.", len(dereferencedDCIDs), ns)
 			}
 		}
 	}
@@ -977,6 +993,9 @@ func (x *XlatorDedup) GetObjectInfo(ctx context.Context, bucket, object string, 
 
 	objInfo, err = x.Mdsclient.GetObjectInfo(bucket, object)
 	if err != nil {
+		if err == redis.Nil {
+			return minio.ObjectInfo{}, minio.ObjectNotFound{Bucket: bucket, Object: object}
+		}
 		logger.Errorf("GetObjectInfo:failed to GetObjectInfo[%s] err: %s", object, err)
 		return objInfo, err
 	}

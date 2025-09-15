@@ -11,15 +11,15 @@ import (
 // reservedKeywords holds a set of names that cannot be used as a namespace or bucket name
 // to avoid conflicts with internal system keys. The check is case-insensitive.
 var reservedKeywords = map[string]struct{}{
-	"dataobj":        {},
-	"fpcache":        {},
-	"buckets":        {},
-	"ref":            {},
-	"deleteddoid":    {},
-	"datamanifestid": {},
-	"dataobjid":      {},
-	"globalns":       {},
-	"dedup":          {},
+	"datacontainer":   {},
+	"fpcache":         {},
+	"buckets":         {},
+	"ref":             {},
+	"deleteddcid":     {},
+	"datamanifestid":  {},
+	"datacontainerid": {},
+	"globalns":        {},
+	"dedup":           {},
 }
 
 // ValidateBucketNameFormat checks if a bucket name conforms to the required format.

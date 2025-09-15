@@ -20,7 +20,6 @@ import (
 	"io"
 	"os"
 
-	miniogo "github.com/minio/minio-go/v7"
 	minio "github.com/minio/minio/cmd"
 	"github.com/zhengshuai-xiao/XlatorS/internal"
 	"github.com/zhengshuai-xiao/XlatorS/internal/compression"
@@ -39,11 +38,11 @@ type BlockHeader struct {
 // DCReader (Data Container Reader) provides read access to a data container.
 // It holds the file handle and a map of fingerprints to their block headers.
 type DCReader struct {
-	bucket   string
-	dobj_key string
-	path     string
-	filer    *os.File
-	fpmap    map[string]BlockHeader
+	bucket string
+	dc_key string
+	path   string
+	filer  *os.File
+	fpmap  map[string]BlockHeader
 }
 
 // readChunkData reads a specific segment of a data block from the data container file.
@@ -168,46 +167,25 @@ func (dr *DCReader) parseDataContainer() error {
 // It then opens the file and parses its metadata into a DCReader.
 func (x *XlatorDedup) getDataObject(bucket, object string, o minio.ObjectOptions) (dcReader DCReader, err error) {
 	ctx := context.Background()
-	//check if the file exist
-	//init the fpmap
-	dcReader.fpmap = make(map[string]BlockHeader)
-	dcReader.path = x.getDobjPathFromLocal(object)
-	_, err = os.Stat(dcReader.path)
-	if err != nil {
-		if os.IsNotExist(err) { // If the file does not exist on local disk
-			// If the backend is S3, try to download it from there.
-			if x.dsBackendType == DObjBackendS3 {
-				if x.Client == nil {
-					return DCReader{}, fmt.Errorf("S3 backend is configured, but S3 client is not initialized")
-				}
-				logger.Tracef("DObj %s not found in local cache, downloading from S3 backend.", dcReader.path)
-				//download from backend
-				opts := miniogo.GetObjectOptions{}
-				opts.ServerSideEncryption = o.ServerSideEncryption
-				dobjCloseReader, _, _, err := x.Client.GetObject(ctx, bucket, object, opts)
-				if err != nil {
-					logger.Errorf("failed to get object[%s] from backend: %s", object, err)
-					return DCReader{}, err
-				}
-				_, err = internal.WriteReadCloserToFile(dobjCloseReader, dcReader.path)
-				if err != nil {
-					logger.Errorf("failed to write object[%s] to local disk: %s", object, err)
-					return DCReader{}, err
-				}
-			} else {
-				// If the backend is local and the file doesn't exist, it's an error.
-				logger.Errorf("getDataObject: DObj %s not found on local disk for '%s' backend.", dcReader.path, DObjBackendPOSIX)
-				return DCReader{}, err // err is os.IsNotExist
-			}
-		} else {
-			logger.Errorf("failed to stat object[%s] on local disk: %s", dcReader.path, err)
-			return
-		}
 
+	dcid, err := GetDCIDFromDCName(object)
+	if err != nil {
+		return DCReader{}, fmt.Errorf("getDataObject: failed to get DOID from object name %s: %w", object, err)
 	}
+
+	dcReader.fpmap = make(map[string]BlockHeader)
+
+	// This single call handles both POSIX (check existence) and S3 (download if not in cache).
+	localPath, err := x.dcBackend.Download(ctx, bucket, uint64(dcid))
+	if err != nil {
+		// If the file is not found either locally (POSIX) or remotely (S3), we'll get an error here.
+		logger.Errorf("getDataObject: failed to download/find data container for DCID %d: %v", dcid, err)
+		return DCReader{}, err
+	}
+	dcReader.path = localPath
 	logger.Tracef("read data object[%s] on local disk", dcReader.path)
 	dcReader.bucket = bucket
-	dcReader.dobj_key = object
+	dcReader.dc_key = object
 	//open data object
 	dcReader.filer, err = os.Open(dcReader.path)
 	if err != nil {
@@ -233,9 +211,9 @@ func (x *XlatorDedup) readDataObject(backendBucket string, chunks []ChunkInManif
 	var currentObjectOffset int64
 
 	// A map to cache DCReaders to avoid re-opening and re-parsing the same data object file.
-	dobjReaderCache := make(map[uint64]DCReader)
+	dcReaderCache := make(map[uint64]DCReader)
 	defer func() {
-		for _, reader := range dobjReaderCache {
+		for _, reader := range dcReaderCache {
 			if reader.filer != nil {
 				reader.filer.Close()
 			}
@@ -254,21 +232,21 @@ func (x *XlatorDedup) readDataObject(backendBucket string, chunks []ChunkInManif
 			break
 		}
 
-		dcReader, ok := dobjReaderCache[chunk.DOid]
+		dcReader, ok := dcReaderCache[chunk.DCID]
 		if !ok {
 			var newReader DCReader
-			newReader, err = x.getDataObject(backendBucket, x.Mdsclient.GetDObjNameInMDS(chunk.DOid), o)
+			newReader, err = x.getDataObject(backendBucket, GetDCName(chunk.DCID), o)
 			if err != nil {
-				logger.Errorf("readDataObject: failed to get data object[%d]: %v", chunk.DOid, err)
+				logger.Errorf("readDataObject: failed to get data container[%d]: %v", chunk.DCID, err)
 				return err
 			}
 			dcReader = newReader
-			dobjReaderCache[chunk.DOid] = dcReader
+			dcReaderCache[chunk.DCID] = dcReader
 		}
 
 		blockHeader, fpOk := dcReader.fpmap[chunk.FP]
 		if !fpOk {
-			err = fmt.Errorf("readDataObject: fingerprint:%s not found in data object %d", internal.StringToHex(chunk.FP), chunk.DOid)
+			err = fmt.Errorf("readDataObject: fingerprint:%s not found in data container %d", internal.StringToHex(chunk.FP), chunk.DCID)
 			logger.Error(err)
 			return err
 		}

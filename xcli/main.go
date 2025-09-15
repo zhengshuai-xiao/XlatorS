@@ -47,6 +47,7 @@ func main() {
 			deleteCmd(),
 			gcTriggerCmd(),
 			listBackupCmd(),
+			delBackupCmd(),
 		},
 	}
 
