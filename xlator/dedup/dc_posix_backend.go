@@ -32,6 +32,11 @@ func (p *POSIXFileUploader) GetWriter() io.WriteCloser {
 
 // Wait closes the file handle. For POSIX, the "upload" is complete once written.
 func (p *POSIXFileUploader) Wait() error {
+	return nil // For POSIX, the file is "uploaded" once closed. Nothing to wait for.
+}
+
+// Close closes the underlying file.
+func (p *POSIXFileUploader) Close() error {
 	return p.filer.Close()
 }
 

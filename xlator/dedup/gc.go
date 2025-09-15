@@ -168,7 +168,7 @@ func (x *XlatorDedup) cleanupNamespace(ctx context.Context, namespace string, ge
 
 			// Defer the closing of the file handle to ensure it's closed on all paths for this DOID.
 			if dcReader.filer != nil { // nolint:ifshort
-				defer dcReader.filer.Close()
+				dcReader.filer.Close()
 			}
 
 			// 3. Delete data object from backend

@@ -25,6 +25,7 @@ OBJECT_NAME=${TEST_FILE_NAME}
 XCLI_CMD="${PROJECT_ROOT}/bin/xcli" # Absolute path to the xcli binary
 GATEWAY_ENDPOINT="localhost:9000"
 REDIS_ADDR="localhost:6379/0"
+BACKEND_ADDR="http://localhost:9001"
 LOG_FILE="${LOG_DIR}/xlator-Dedup.log"
 
 # --- Helper Functions ---
@@ -66,12 +67,23 @@ info "--- Starting Test Environment ---"
 # Build project binaries
 (cd "${PROJECT_ROOT}" && make build)
 
+# Determine backend type from script argument, default to posix
+BACKEND_TYPE=${1:-posix}
+if [ "${BACKEND_TYPE}" != "posix" ] && [ "${BACKEND_TYPE}" != "s3" ]; then
+    error "Invalid backend type '${BACKEND_TYPE}'. Must be 'posix' or 's3'."
+fi
+info "--- Using backend type: ${BACKEND_TYPE} ---"
+
 # Create test directory for cache mount
 mkdir -p ${TEST_DIR} ${LOG_DIR}
 
 # Start services in detached mode
 # The -d flag runs the gateway in the background. The PID is stored in LOG_DIR.
-${PROJECT_ROOT}/bin/xlators gateway --xlator Dedup --ds-backend posix --meta-addr "${REDIS_ADDR}" --downloadCache ${TEST_DIR}  --loglevel trace --logdir ${LOG_DIR} -d
+if [ "${BACKEND_TYPE}" == "s3" ]; then
+    ${PROJECT_ROOT}/bin/xlators gateway --xlator Dedup --ds-backend s3 --backend-addr "${BACKEND_ADDR}" --meta-addr "${REDIS_ADDR}" --downloadCache ${TEST_DIR} --loglevel trace --logdir ${LOG_DIR} -d
+else
+    ${PROJECT_ROOT}/bin/xlators gateway --xlator Dedup --ds-backend posix --meta-addr "${REDIS_ADDR}" --downloadCache ${TEST_DIR} --loglevel trace --logdir ${LOG_DIR} -d
+fi
 info "Waiting for services to start..."
 sleep 10 # Give services time to initialize
 

@@ -26,23 +26,33 @@ import (
 // S3Backend implements DataContainerBackend for an S3-compatible storage.
 type S3Backend struct {
 	dcCachePath string
-	client      *miniogo.Core
+	client      *miniogo.Client
 }
 
-// S3StreamUploader handles streaming a data container directly to S3.
-type S3StreamUploader struct {
+// S3ClientUploader handles streaming a data container directly to S3 using the high-level client.
+type S3ClientUploader struct {
 	pw      *io.PipeWriter
-	errChan <-chan error
+	pr      *io.PipeReader
+	client  *miniogo.Client
+	bucket  string
+	key     string
+	errChan chan error
 }
 
 // GetWriter returns the pipe writer to stream data into.
-func (u *S3StreamUploader) GetWriter() io.WriteCloser {
+func (u *S3ClientUploader) GetWriter() io.WriteCloser {
 	return u.pw
 }
 
 // Wait blocks until the S3 upload is complete and returns the result.
-func (u *S3StreamUploader) Wait() error {
+// The actual upload is triggered here, consuming data from the pipe reader.
+func (u *S3ClientUploader) Wait() error {
 	return <-u.errChan
+}
+
+// Close closes the pipe writer, signaling to the reader that all data has been written.
+func (u *S3ClientUploader) Close() error {
+	return u.pw.Close()
 }
 
 func (s *S3Backend) getS3Key(dcid uint64) string {
@@ -51,26 +61,31 @@ func (s *S3Backend) getS3Key(dcid uint64) string {
 	return fmt.Sprintf("%d/%s", parentDirID, dcName)
 }
 
-// GetUploader for S3 backend sets up a pipe for streaming upload.
+// GetUploader for S3 backend sets up a pipe for streaming upload using the high-level client.
 func (s *S3Backend) GetUploader(ctx context.Context, bucket string, dcid uint64) (DataContainerUploader, string, string, error) {
 	key := s.getS3Key(dcid)
 	pr, pw := io.Pipe()
-	errChan := make(chan error, 1)
+
+	uploader := &S3ClientUploader{
+		pw:      pw,
+		pr:      pr,
+		client:  s.client,
+		bucket:  bucket,
+		key:     key,
+		errChan: make(chan error, 1),
+	}
 
 	go func() {
-		defer close(errChan)
+		defer close(uploader.errChan)
 		opts := miniogo.PutObjectOptions{ContentType: "application/octet-stream"}
-		_, err := s.client.PutObject(ctx, bucket, key, pr, -1, "", "", opts)
+		_, err := s.client.PutObject(ctx, bucket, key, pr, -1, opts)
 		if err != nil {
 			pr.CloseWithError(err) // Ensure the reader side unblocks on error
 		}
-		errChan <- err
+		uploader.errChan <- err
 	}()
 
-	return &S3StreamUploader{
-		pw:      pw,
-		errChan: errChan,
-	}, "", key, nil // S3 backend doesn't produce a local path on upload
+	return uploader, "", key, nil // S3 backend doesn't produce a local path on upload
 }
 
 // Download retrieves the data container from the S3 backend if it's not present locally.
@@ -84,7 +99,7 @@ func (s *S3Backend) Download(ctx context.Context, bucket string, dcid uint64) (s
 		return "", fmt.Errorf("failed to create data container cache directory %s: %w", filepath.Dir(localPath), err)
 	}
 
-	dobjCloseReader, _, _, err := s.client.GetObject(ctx, bucket, key, miniogo.GetObjectOptions{})
+	dobjCloseReader, err := s.client.GetObject(ctx, bucket, key, miniogo.GetObjectOptions{})
 	if err != nil {
 		return "", fmt.Errorf("failed to get object %s from S3 backend: %w", key, err)
 	}

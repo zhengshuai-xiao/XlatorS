@@ -16,6 +16,7 @@ import "io"
 
 // DataContainerUploader defines the interface for uploading a data container.
 type DataContainerUploader interface {
+	io.Closer
 	GetWriter() io.WriteCloser
 	Wait() error
 }

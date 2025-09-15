@@ -23,7 +23,6 @@ import (
 
 	miniogo "github.com/minio/minio-go/v7"
 	"github.com/zhengshuai-xiao/XlatorS/internal"
-	S3client "github.com/zhengshuai-xiao/XlatorS/pkg/s3client"
 )
 
 // getManifestPath generates a sharded file path for a manifest based on its ID.
@@ -96,7 +95,7 @@ func (x *XlatorDedup) writeManifest(ctx context.Context, namespace string, manif
 			return nil, fmt.Errorf("S3 backend is configured, but S3 client is not initialized")
 		}
 		backendBucket := GetBackendBucketName(namespace)
-		_, err = S3client.UploadFile(ctx, x.Client, backendBucket, manifestID, path)
+		_, err = x.Client.FPutObject(ctx, backendBucket, manifestID, path, miniogo.PutObjectOptions{})
 		if err != nil {
 			return nil, fmt.Errorf("failed to upload manifest file '%s' to S3 backend: %w", path, err)
 		}
@@ -252,7 +251,7 @@ func (x *XlatorDedup) ensureManifestLocal(ctx context.Context, namespace, manife
 
 		backendBucket := GetBackendBucketName(namespace)
 		opts := miniogo.GetObjectOptions{}
-		manifestReader, _, _, err := x.Client.GetObject(ctx, backendBucket, manifestID, opts)
+		manifestReader, err := x.Client.GetObject(ctx, backendBucket, manifestID, opts)
 		if err != nil {
 			return "", fmt.Errorf("failed to get manifest %s from backend: %w", manifestID, err)
 		}

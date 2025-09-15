@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"sort"
 	"strconv"
@@ -29,13 +30,12 @@ import (
 	"time"
 
 	miniogo "github.com/minio/minio-go/v7"
+	"github.com/minio/minio-go/v7/pkg/credentials"
 	"github.com/redis/go-redis/v9"
 	"github.com/zhengshuai-xiao/XlatorS/internal"
 
 	minio "github.com/minio/minio/cmd"
-	"github.com/minio/minio/pkg/auth"
 	"github.com/minio/minio/pkg/madmin"
-	S3client "github.com/zhengshuai-xiao/XlatorS/pkg/s3client"
 )
 
 const (
@@ -48,7 +48,7 @@ const (
 
 type XlatorDedup struct {
 	minio.GatewayUnsupported
-	Client               *miniogo.Core
+	Client               *miniogo.Client // Changed to high-level client
 	HTTPClient           *http.Client
 	Metrics              *minio.BackendMetrics
 	Mdsclient            MDS
@@ -121,17 +121,26 @@ func NewXlatorDedup(gConf *internal.Config) (*XlatorDedup, error) {
 
 	// Initialize S3 client only if the backend is S3.
 	if xlatorDedup.dsBackendType == DObjBackendS3 {
-		s3 := &S3client.S3{Host: gConf.BackendAddr}
-		logger.Info("NewS3Gateway Endpoint:", s3.Host)
-		creds := auth.Credentials{}
-		client, err := s3.NewGatewayLayer(creds, t)
+		backendEndpointURL, err := url.Parse(gConf.BackendAddr)
 		if err != nil {
-			logger.Errorf("failed to create S3 client: %v", err)
-			return nil, err
+			return nil, fmt.Errorf("invalid backend address: %w", err)
 		}
-		xlatorDedup.Client = client
+
+		// Assume backend creds are same as gateway creds from env
+		accessKey := os.Getenv("MINIO_ROOT_USER")
+		secretKey := os.Getenv("MINIO_ROOT_PASSWORD")
+
+		s3Client, err := miniogo.New(backendEndpointURL.Host, &miniogo.Options{
+			Creds:     credentials.NewStaticV4(accessKey, secretKey, ""),
+			Secure:    backendEndpointURL.Scheme == "https",
+			Transport: t, // Reuse the metrics transport
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to create backend S3 client: %w", err)
+		}
+		xlatorDedup.Client = s3Client
 		if s3Backend, ok := xlatorDedup.dcBackend.(*S3Backend); ok {
-			s3Backend.client = client
+			s3Backend.client = s3Client
 		}
 	}
 

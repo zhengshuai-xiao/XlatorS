@@ -113,7 +113,7 @@ func (x *XlatorDedup) writeObj(ctx context.Context, ns string, r *minio.PutObjRe
 			//write data
 			n, compressedLen, writeErr := dcMgr.WriteChunks(chunks)
 			if writeErr != nil {
-				logger.Errorf("writeObj: failed to writeDObj: %s", writeErr)
+				logger.Errorf("writeObj: failed to WriteChunks: %s", writeErr)
 				return nil, writeErr
 			}
 			totalWriteSize += int64(n)
@@ -237,7 +237,7 @@ func (x *XlatorDedup) writePart(ctx context.Context, ns string, r *minio.PutObjR
 
 			written, _, writeErr := dcMgr.WriteChunks(chunks)
 			if writeErr != nil {
-				logger.Errorf("writePart: failed to writeDObj: %s", writeErr)
+				logger.Errorf("writePart: failed to WriteChunks: %s", writeErr)
 				return 0, 0, nil, writeErr
 			}
 			totalWriteSize += int64(written)

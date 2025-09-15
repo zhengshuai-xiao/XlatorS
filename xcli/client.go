@@ -1,18 +1,18 @@
 package main
 
 import (
-	"github.com/minio/minio-go/v7"
+	miniogo "github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 	"github.com/urfave/cli/v2"
 )
 
-func newS3Client(c *cli.Context) (*minio.Client, error) {
+func newS3Client(c *cli.Context) (*miniogo.Client, error) {
 	endpoint := c.String("endpoint")
 	accessKeyID := c.String("access-key")
 	secretAccessKey := c.String("secret-key")
 	useSSL := !c.Bool("no-ssl")
 
-	minioClient, err := minio.New(endpoint, &minio.Options{
+	minioClient, err := miniogo.New(endpoint, &miniogo.Options{
 		Creds:  credentials.NewStaticV4(accessKeyID, secretAccessKey, ""),
 		Secure: useSSL,
 	})

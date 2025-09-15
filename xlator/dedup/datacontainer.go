@@ -17,8 +17,8 @@ import (
 	"encoding/binary"
 	"encoding/gob"
 	"fmt"
-	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 
 	"github.com/zhengshuai-xiao/XlatorS/internal"
@@ -36,12 +36,12 @@ const (
 
 // DataContainer represents an active data object being written to disk.
 type DataContainer struct {
-	bucket string
-	key    string
-	path   string
-	offset uint64
-	writer io.WriteCloser
-	fps    []BlockHeader
+	bucket   string
+	key      string
+	path     string
+	offset   uint64
+	uploader DataContainerUploader
+	fps      []BlockHeader
 }
 
 // DataContainerMgr manages the lifecycle of data containers for a write operation.
@@ -146,13 +146,13 @@ func (mgr *DataContainerMgr) WriteChunks(chunks []Chunk) (writtenLen int, compre
 			dataToWrite = compressedData
 		}
 
-		wlen, err := internal.WriteAll(mgr.activeContainer.writer, dataToWrite)
+		wlen, err := internal.WriteAll(mgr.activeContainer.uploader.GetWriter(), dataToWrite)
 		if err != nil {
 			return 0, 0, err
 		}
 		writtenLen += wlen
 
-		dcid, err := GetDCIDFromDCName(mgr.activeContainer.key)
+		dcid, err := GetDCIDFromDCName(filepath.Base(mgr.activeContainer.key))
 		if err != nil {
 			return 0, 0, err
 		}
@@ -193,61 +193,66 @@ func (mgr *DataContainerMgr) newContainer() (*DataContainer, error) {
 	if err != nil {
 		return nil, err
 	}
-	writer := uploader.GetWriter()
 
 	// Write magic number and version
 	header := make([]byte, headerSize)
 	binary.LittleEndian.PutUint32(header[0:4], DataContainerMagic)
 	binary.LittleEndian.PutUint32(header[4:8], uint32(DataContainerVersion))
-	if _, err := writer.Write(header); err != nil {
-		writer.Close()
+	if _, err := uploader.GetWriter().Write(header); err != nil {
+		uploader.Close()
 		return nil, fmt.Errorf("failed to write data container header: %w", err)
 	}
-
+	logger.Info("xzs:successfully write data container header")
 	return &DataContainer{
-		bucket: GetBackendBucketName(mgr.ns),
-		key:    key,
-		path:   path,
-		writer: writer,
-		offset: headerSize,
-		fps:    []BlockHeader{},
-		// uploader is not stored here, it's managed by finalizeContainer
+		bucket:   GetBackendBucketName(mgr.ns),
+		key:      key,
+		path:     path,
+		uploader: uploader,
+		offset:   headerSize,
+		fps:      []BlockHeader{},
 	}, nil
 }
 
 // finalizeContainer writes metadata to the container file, closes it, and uploads it.
 func (mgr *DataContainerMgr) finalizeContainer(container *DataContainer) error {
-	defer container.writer.Close()
 	// If only the header was written, it's an empty container.
 	if container.offset == headerSize {
 		os.Remove(container.path)
+		// We must close and wait to clean up the uploader goroutine.
+		// We can ignore errors here as we are discarding this container.
+		_ = container.uploader.Close()
+		_ = container.uploader.Wait()
 		return nil
 	}
 
 	// The current offset is where the metadata (gob) will start.
 	metadataOffset := container.offset
 
-	encoder := gob.NewEncoder(container.writer)
+	encoder := gob.NewEncoder(container.uploader.GetWriter())
 	for _, fp := range container.fps {
 		if err := encoder.Encode(fp); err != nil {
-			return err
+			// If encoding fails, the stream is likely broken. Close and wait to clean up.
+			_ = container.uploader.Close()
+			_ = container.uploader.Wait()
+			return fmt.Errorf("failed to encode block header: %w", err)
 		}
 	}
 
 	// Now write the offset of the metadata at the very end of the file.
 	offsetBytes := internal.UInt64ToBytesLittleEndian(metadataOffset)
-	if _, err := container.writer.Write(offsetBytes[:]); err != nil {
+	if _, err := container.uploader.GetWriter().Write(offsetBytes[:]); err != nil {
+		_ = container.uploader.Close()
+		_ = container.uploader.Wait()
 		return fmt.Errorf("failed to write offset footer: %w", err)
 	}
 
 	// Close the writer to signal the end of the stream for S3 or to flush the file for POSIX.
-	if err := container.writer.Close(); err != nil {
+	if err := container.uploader.Close(); err != nil {
+		// The writer is closed, but with an error. We should still wait to get the real error from the uploader.
+		_ = container.uploader.Wait() // Attempt to clean up
 		return fmt.Errorf("failed to close container writer: %w", err)
 	}
 
-	// The uploader is not part of the DataContainer struct, so we need to re-create it to wait.
-	// This is a bit awkward. Let's assume the uploader is tied to the writer's lifecycle.
-	// The Wait() call is now implicit in the backend implementation after the writer is closed.
-	// For S3, the go-routine will finish. For POSIX, the file is already written.
-	return nil
+	// For S3, this waits for the upload goroutine to finish. For POSIX, it's a no-op.
+	return container.uploader.Wait()
 }
