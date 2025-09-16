@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/minio/minio-go/v7"
 	"github.com/urfave/cli/v2"
@@ -63,6 +64,9 @@ func restoreCmd() *cli.Command {
 
 			pathsToRestore := c.Args().Slice()
 
+			var totalDownloadedSize int64
+			start := time.Now()
+
 			// 5. Start a goroutine to reconstruct the tar stream
 			go func() {
 				defer pw.Close()
@@ -71,6 +75,7 @@ func restoreCmd() *cli.Command {
 				// Create a tar writer to write to the pipe
 				tw := tar.NewWriter(pw)
 				defer tw.Close()
+				var downloadedSize int64
 
 				for _, fileMeta := range manifest.Files {
 					shouldRestore := false
@@ -117,6 +122,7 @@ func restoreCmd() *cli.Command {
 							pw.CloseWithError(fmt.Errorf("failed to get data for %s: %w", fileMeta.Header.Name, err))
 							return
 						}
+						downloadedSize += fileMeta.Header.Size
 
 						// Stream the data into the tar writer
 						if _, err := io.Copy(tw, dataObj); err != nil {
@@ -127,6 +133,7 @@ func restoreCmd() *cli.Command {
 						dataObj.Close()
 					}
 				}
+				totalDownloadedSize = downloadedSize
 				log.Println("Tar stream reconstruction complete.")
 			}()
 
@@ -140,7 +147,16 @@ func restoreCmd() *cli.Command {
 				return fmt.Errorf("failed to unpack tar stream: %w", err)
 			}
 
+			elapsed := time.Since(start)
+			var throughput float64
+			if elapsed.Seconds() > 0 {
+				throughput = float64(totalDownloadedSize) / (1024 * 1024) / elapsed.Seconds()
+			}
+
 			log.Printf("Restore completed successfully to directory '%s'.", destDir)
+			log.Printf("  Total Downloaded: %d bytes", totalDownloadedSize)
+			log.Printf("  Time taken:       %s", elapsed)
+			log.Printf("  Avg Speed:        %.2f MB/s", throughput)
 			return nil
 		},
 	}

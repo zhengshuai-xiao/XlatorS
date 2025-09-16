@@ -95,6 +95,19 @@ func (s *S3Backend) Download(ctx context.Context, bucket string, dcid uint64) (s
 	parentDirID := dcid / 1024
 	localPath := filepath.Join(s.dcCachePath, fmt.Sprintf("%d", parentDirID), dcName)
 
+	// Check if the file already exists in the local cache.
+	if _, err := os.Stat(localPath); err == nil {
+		// File exists, no need to download.
+		logger.Tracef("S3Backend Download: cache hit for dcid %d at %s", dcid, localPath)
+		return localPath, nil
+	} else if !os.IsNotExist(err) {
+		// Some other error occurred while stating the file.
+		return "", fmt.Errorf("failed to stat local cache file %s: %w", localPath, err)
+	}
+
+	// File does not exist, proceed with download.
+	logger.Tracef("S3Backend Download: cache miss for dcid %d, downloading from s3://%s/%s", dcid, bucket, key)
+
 	if err := os.MkdirAll(filepath.Dir(localPath), 0755); err != nil {
 		return "", fmt.Errorf("failed to create data container cache directory %s: %w", filepath.Dir(localPath), err)
 	}
@@ -106,6 +119,7 @@ func (s *S3Backend) Download(ctx context.Context, bucket string, dcid uint64) (s
 	defer dobjCloseReader.Close()
 
 	if _, err = internal.WriteReadCloserToFile(dobjCloseReader, localPath); err != nil {
+		os.Remove(localPath) // Clean up partially written file on error
 		return "", fmt.Errorf("failed to write object %s to local disk: %w", key, err)
 	}
 	return localPath, nil

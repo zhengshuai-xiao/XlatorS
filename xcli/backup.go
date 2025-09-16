@@ -99,6 +99,9 @@ func backupCmd() *cli.Command {
 			// 6. Upload both streams concurrently
 			var wg sync.WaitGroup
 			errChan := make(chan error, 2)
+			uploadInfoChan := make(chan minio.UploadInfo, 2)
+
+			start := time.Now()
 
 			// Upload HDR object
 			wg.Add(1)
@@ -112,9 +115,11 @@ func backupCmd() *cli.Command {
 					DisableMultipart: disableMultipart,
 					PartSize:         partSize,
 				}
-				_, err := client.PutObject(ctx, bucketName, hdrObjectName, hReader, -1, hdrOpts)
+				info, err := client.PutObject(ctx, bucketName, hdrObjectName, hReader, -1, hdrOpts)
 				if err != nil {
 					errChan <- fmt.Errorf("failed to upload header object: %w", err)
+				} else {
+					uploadInfoChan <- info
 				}
 			}()
 
@@ -130,15 +135,19 @@ func backupCmd() *cli.Command {
 					UserMetadata:     make(map[string]string),
 				}
 				dataOpts.UserMetadata["Chunk-Method"] = c.String("chunk-method")
-				_, err := client.PutObject(ctx, bucketName, dataObjectName, dReader, -1, dataOpts)
+				info, err := client.PutObject(ctx, bucketName, dataObjectName, dReader, -1, dataOpts)
 				if err != nil {
 					errChan <- fmt.Errorf("failed to upload data object: %w", err)
+				} else {
+					uploadInfoChan <- info
 				}
 			}()
 
 			// 7. Wait for uploads to complete and check for errors
 			wg.Wait()
+			elapsed := time.Since(start)
 			close(errChan)
+			close(uploadInfoChan)
 
 			for uploadErr := range errChan {
 				if uploadErr != nil {
@@ -146,9 +155,22 @@ func backupCmd() *cli.Command {
 				}
 			}
 
+			var totalSize int64
+			for info := range uploadInfoChan {
+				totalSize += info.Size
+			}
+
+			var throughput float64
+			if elapsed.Seconds() > 0 {
+				throughput = float64(totalSize) / (1024 * 1024) / elapsed.Seconds()
+			}
+
 			log.Printf("Backup of '%s' completed successfully.", srcDir)
 			log.Printf("  Header Object: s3://%s/%s", bucketName, hdrObjectName)
 			log.Printf("  Data Object:   s3://%s/%s", bucketName, dataObjectName)
+			log.Printf("  Total Size:    %d bytes", totalSize)
+			log.Printf("  Time taken:    %s", elapsed)
+			log.Printf("  Throughput:    %.2f MB/s", throughput)
 			return nil
 		},
 	}
