@@ -41,6 +41,7 @@ type MDS interface {
 	RemoveFPs(namespace string, FPs []string, DCID uint64) error
 	AddDeletedDCIDs(namespace string, dcids []uint64) error
 	GetRandomDeletedDCIDs(namespace string, count int64) ([]uint64, error)
+	LoadFPCache(namespace string) (map[string]uint64, error)
 	RemoveSpecificDeletedDCIDs(namespace string, dcids []uint64) error
 	GetAllNamespaces() ([]string, error)
 	IsDCIDDeleted(namespace string, dcid uint64) (bool, error)

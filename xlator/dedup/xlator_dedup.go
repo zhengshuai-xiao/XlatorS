@@ -63,6 +63,7 @@ type XlatorDedup struct {
 	dsBackendType        DObjBackendType // datastore bankend type: "posix" or "s3"
 	dcBackend            DataContainerBackend
 	Compression          string
+	fpCache              *FPLocalCache
 }
 
 var logger = internal.GetLogger("XlatorDedup")
@@ -181,6 +182,14 @@ func NewXlatorDedup(gConf *internal.Config) (*XlatorDedup, error) {
 	//set compression
 	xlatorDedup.Compression = strings.ToLower(gConf.Compression)
 	logger.Infof("compression is using %s", xlatorDedup.Compression)
+
+	// Initialize the fingerprint local cache
+	fpCache, err := NewFPLocalCache(context.Background(), xlatorDedup.Mdsclient, xlatorDedup)
+	if err != nil {
+		logger.Errorf("failed to create FP local cache: %v", err)
+		return nil, err
+	}
+	xlatorDedup.fpCache = fpCache
 
 	// Start the background GC worker
 	//TODO: only leader can launch GC, so need leader selection
@@ -502,10 +511,11 @@ func (x *XlatorDedup) PutObject(ctx context.Context, bucket string, object strin
 	}
 	elapsed2 := time.Since(start2)
 	logger.Infof("PutObject 4, manifestList=%d, elapsed2=%f", len(manifestList), elapsed2.Seconds())
-	err = x.Mdsclient.InsertFPsBatch(ns, manifestList)
+	// Update the local in-memory FP cache to keep it in sync.
+	err = x.fpCache.InsertFPsBatch(ns, manifestList)
 	if err != nil {
-		logger.Errorf("failed to insert fingerprints for object %s: %v", object, err)
-		return objInfo, err
+		// Log a warning, as this is not a critical failure but affects performance.
+		logger.Warnf("failed to update local FP cache for object %s: %v", object, err)
 	}
 
 	elapsed := time.Since(start1)
@@ -768,9 +778,10 @@ func (x *XlatorDedup) CompleteMultipartUpload(ctx context.Context, bucket string
 		return oi, err
 	}
 
-	if err = x.Mdsclient.InsertFPsBatch(ns, finalManifest); err != nil {
-		logger.Errorf("CompleteMultipartUpload: failed to insert final fingerprints for %s/%s: %v", bucket, object, err)
-		return oi, err
+	// Also update the local in-memory FP cache to keep it in sync.
+	if err = x.fpCache.InsertFPsBatch(ns, finalManifest); err != nil {
+		// Log a warning, as this is not a critical failure but affects performance.
+		logger.Warnf("CompleteMultipartUpload: failed to update local FP cache for %s/%s: %v", bucket, object, err)
 	}
 
 	// Always remove the in-memory FP cache for this upload session.

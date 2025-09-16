@@ -95,9 +95,9 @@ func (x *XlatorDedup) writeObj(ctx context.Context, ns string, r *minio.PutObjRe
 			}
 
 			if len(chunksToBatch) > 0 {
-				if dedupErr := x.Mdsclient.DedupFPsBatch(ns, chunksToBatch); dedupErr != nil {
-					logger.Errorf("writeObj: failed to deduplicate chunks with Redis: %s", dedupErr)
-					return nil, dedupErr
+				// Tier 2: Check the in-memory global FP cache.
+				if err := x.fpCache.DedupFPsBatch(ns, chunksToBatch); err != nil {
+					logger.Warnf("writeObj: error checking local FP cache: %s. Proceeding with MDS.", err)
 				}
 
 				for i, resultChunk := range chunksToBatch {
@@ -220,9 +220,9 @@ func (x *XlatorDedup) writePart(ctx context.Context, ns string, r *minio.PutObjR
 			}
 
 			if len(chunksToBatch) > 0 {
-				if dedupErr := x.Mdsclient.DedupFPsBatch(ns, chunksToBatch); dedupErr != nil {
-					logger.Errorf("writePart: failed to deduplicate chunks with Redis: %s", dedupErr)
-					return 0, 0, nil, dedupErr
+				// Tier 2: Check the in-memory global FP cache.
+				if err := x.fpCache.DedupFPsBatch(ns, chunksToBatch); err != nil {
+					logger.Warnf("writePart: error checking local FP cache: %s. Proceeding with MDS.", err)
 				}
 
 				for i, resultChunk := range chunksToBatch {

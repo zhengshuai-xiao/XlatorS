@@ -180,3 +180,12 @@ func (m *MockMDS) AddDeletedDCIDs(namespace string, dcids []uint64) error {
 	args := m.Called(namespace, dcids)
 	return args.Error(0)
 }
+
+func (m *MockMDS) LoadFPCache(namespace string) (map[string]uint64, error) {
+	args := m.Called(namespace)
+	var r0 map[string]uint64
+	if args.Get(0) != nil {
+		r0 = args.Get(0).(map[string]uint64)
+	}
+	return r0, args.Error(1)
+}
